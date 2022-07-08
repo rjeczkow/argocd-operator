@@ -1,0 +1,14 @@
+apiVersion: kuttl.dev/v1beta1
+kind: TestStep
+commands:
+- script: | 
+    set -ex
+    smtpdev_pod=$(kubectl get pod -l=app=smtp4dev -o NAME -n $NAMESPACE)
+    kubectl -n $NAMESPACE exec --stdin --tty ${smtpdev_pod} -- /bin/bash -c 'ls /tmp && cat /tmp/*'
+    exit_code=$(kubectl -n $NAMESPACE exec --stdin --tty ${smtpdev_pod} -- /bin/bash -c 'if [[ $(grep -rnw /tmp -e "Subject: Application my-app-3 has been created.") ]]; then exit 0; else exit 1; fi')
+
+    if [[ $exit_code -eq 0 ]]; then
+        exit 0
+    else
+        exit 1
+    fi
