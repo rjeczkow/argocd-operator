@@ -27,6 +27,7 @@ Name | Default | Description
 [**Import**](#import-options) | [Object] | Import configuration options.
 [**Ingress**](#ingress-options) | [Object] | Ingress configuration options.
 [**InitialRepositories**](#initial-repositories) | [Empty] | Initial git repositories to configure Argo CD to use upon creation of the cluster.
+[**Notifications**](#notifications-controller-options) | [Object] | Notifications controller configuration options.
 [**RepositoryCredentials**](#repository-credentials) | [Empty] | Git repository credential templates to configure Argo CD to use upon creation of the cluster.
 [**InitialSSHKnownHosts**](#initial-ssh-known-hosts) | [Default Argo CD Known Hosts] | Initial SSH Known Hosts for Argo CD to use upon creation of the cluster.
 [**KustomizeBuildOptions**](#kustomize-build-options) | [Empty] | The build options/parameters to use with `kustomize build`.
@@ -38,12 +39,14 @@ Name | Default | Description
 [**ResourceCustomizations**](#resource-customizations) | [Empty] | Customize resource behavior.
 [**ResourceExclusions**](#resource-exclusions) | [Empty] | The configuration to completely ignore entire classes of resource group/kinds.
 [**ResourceInclusions**](#resource-inclusions) | [Empty] | The configuration to configure which resource group/kinds are applied.
+[**ResourceTrackingMethod**](#resource-tracking-method) | `label` | The resource tracking method Argo CD should use.
 [**Server**](#server-options) | [Object] | Argo CD Server configuration options.
 [**SSO**](#single-sign-on-options) | [Object] | Single sign-on options.
 [**StatusBadgeEnabled**](#status-badge-enabled) | `true` | Enable application status badge feature.
 [**TLS**](#tls-options) | [Object] | TLS configuration options.
 [**UsersAnonymousEnabled**](#users-anonymous-enabled) | `true` | Enable anonymous user access.
-[**Version**](#version) | v2.1.2 (SHA) | The tag to use with the container image for all Argo CD components.
+[**Version**](#version) | v2.4.0 (SHA) | The tag to use with the container image for all Argo CD components.
+[**Banner**](#banner) | [Object] | Add a UI banner message.
 
 ## Application Instance Label Key
 
@@ -155,6 +158,9 @@ spec:
 
 ## Dex Options
 
+!!! warning 
+    `.spec.dex` is deprecated and support will be removed in Argo CD operator v0.6.0. Please use `.spec.sso.dex` to configure Dex.
+
 The following properties are available for configuring the Dex component.
 
 Name | Default | Description
@@ -168,7 +174,7 @@ Version | v2.21.0 (SHA) | The tag to use with the Dex container image.
 
 ### Dex Example
 
-The following example shows all properties set to the default values.
+The following examples show all properties set to the default values. Both configuration methods will be supported until v0.6.0
 
 ``` yaml
 apiVersion: argoproj.io/v1alpha1
@@ -187,6 +193,30 @@ spec:
     resources: {}
     version: v2.21.0
 ```
+OR
+
+``` yaml
+apiVersion: argoproj.io/v1alpha1
+kind: ArgoCD
+metadata:
+  name: example-argocd
+  labels:
+    example: dex
+spec:
+  sso:
+    provider: dex
+    dex:
+      config: ""
+      groups:
+        - default
+      image: quay.io/dexidp/dex
+      openShiftOAuth: false
+      resources: {}
+      version: v2.21.0
+```
+
+Please refer to the [dex user guide](../usage/dex.md) to learn more about configuring dex as a Single sign-on provider.
+
 
 ### Dex OpenShift OAuth Example
 
@@ -521,6 +551,32 @@ spec:
       url: https://github.com/argoproj/argocd-example-apps.git
 ```
 
+## Notifications Controller Options
+
+The following properties are available for configuring the Notifications controller component.
+
+Name | Default | Description
+--- | --- | ---
+Enabled | `false` | The toggle that determines whether notifications-controller should be started or not.  
+Image | `argoproj/argocd` | The container image for all Argo CD components. This overrides the `ARGOCD_IMAGE` environment variable.
+Version | *(recent Argo CD version)* | The tag to use with the Notifications container image.
+Resources | [Empty] | The container compute resources.
+LogLevel | info | The log level to be used by the ArgoCD Application Controller component. Valid options are debug, info, error, and warn.
+
+### Notifications Controller Example
+
+The following example shows all properties set to the default values.
+
+``` yaml
+apiVersion: argoproj.io/v1alpha1
+kind: ArgoCD
+metadata:
+  name: example-argocd
+spec:
+  notifications:
+    enabled: true
+```
+
 ## Repository Credentials
 
 Git repository credential templates to configure Argo CD to use upon creation of the cluster.
@@ -578,6 +634,35 @@ spec:
       my-git.org ssh-rsa AAAAB3NzaC...
       my-git.com ssh-rsa AAAAB3NzaC...
 ```
+
+## Keycloak Options
+
+The following properties are available for configuring Keycloak Single sign-on provider.
+
+Name | Default | Description
+--- | --- | ---
+Image | OpenShift - `registry.redhat.io/rh-sso-7/sso75-openshift-rhel8` <br/> Kuberentes - `quay.io/keycloak/keycloak` | The container image for keycloak. This overrides the `ARGOCD_KEYCLOAK_IMAGE` environment variable.
+Resources | `Requests`: CPU=500m, Mem=512Mi, `Limits`: CPU=1000m, Mem=1024Mi | The container compute resources.
+VerifyTLS | true | Whether to enforce strict TLS checking when communicating with Keycloak service.
+Version | OpenShift - `sha256:720a7e4c4926c41c1219a90daaea3b971a3d0da5a152a96fed4fb544d80f52e3` (7.5.1) <br/> Kubernetes - `sha256:64fb81886fde61dee55091e6033481fa5ccdac62ae30a4fd29b54eb5e97df6a9` (15.0.2) | The tag to use with the keycloak container image.
+
+### Keycloak Single sign-on Example
+
+The following example uses keycloak as Single sign-on option for Argo CD.
+
+``` yaml
+apiVersion: argoproj.io/v1alpha1
+kind: ArgoCD
+metadata:
+  name: example-argocd
+  labels:
+    example: status-badge-enabled
+spec:
+  sso:
+    provider: keycloak
+```
+
+Please refer to the [keycloak user guide](../usage/keycloak/kubernetes.md) to learn more about configuring keycloak as a Single sign-on provider.
 
 ## Kustomize Build Options
 
@@ -782,6 +867,8 @@ The following properties are available for configuring the Redis component.
 
 Name | Default | Description
 --- | --- | ---
+AutoTLS | "" | Provider to use for creating the redis server's TLS certificate (one of: `openshift`). Currently only available for OpenShift.
+DisableTLSVerification | false | defines whether the redis server should be accessed using strict TLS validation
 Image | `redis` | The container image for Redis. This overrides the `ARGOCD_REDIS_IMAGE` environment variable.
 Resources | [Empty] | The container compute resources.
 Version | 5.0.3 (SHA) | The tag to use with the Redis container image.
@@ -802,6 +889,8 @@ spec:
     image: redis
     resources: {}
     version: "5.0.3"
+    disableTLSVerification: false
+    autotls: ""
 ```
 
 ## Repo Options
@@ -821,6 +910,7 @@ LogLevel | info | The log level to be used by the ArgoCD Repo Server. Valid opti
 LogFormat | text | The log format to be used by the ArgoCD Repo Server. Valid options are text or json.
 ExecTimeout | 180 | Execution timeout in seconds for rendering tools (e.g. Helm, Kustomize)
 Env | [Empty] | Environment to set for the repository server workloads
+Replicas | [Empty] | The number of replicas for the ArgoCD Repo Server. Must be greater than or equal to 0. 
 
 ### Repo Example
 
@@ -840,6 +930,7 @@ spec:
     serviceaccount: ""
     verifytls: false
     autotls: ""
+    replicas: 1
 ```
 
 ## Resource Customizations
@@ -961,6 +1052,37 @@ spec:
       - https://192.168.0.20
 ```
 
+## Resource Tracking Method
+
+You can configure which 
+[resource tracking method](https://argo-cd.readthedocs.io/en/stable/user-guide/resource_tracking/#choosing-a-tracking-method)
+Argo CD should use to keep track of the resources it manages.
+
+Valid values are:
+
+* `label` - Track resources using a label
+* `annotation` - Track resources using an annotation
+* `annotation+label` - Track resources using both, an annotation and a label
+
+The default is to use `label` as tracking method.
+
+When this value is changed, existing managed resources will re-sync to apply the new tracking method.
+
+### Resource Tracking Method
+
+The following example sets the resource tracking method to `annotation+label`
+
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: ArgoCD
+metadata:
+  name: example-argocd
+  labels:
+    example: resource-tracking-method
+spec:
+  resourceTrackingMethod: annotation+label
+```
+
 ## Server Options
 
 The following properties are available for configuring the Argo CD Server component.
@@ -968,11 +1090,13 @@ The following properties are available for configuring the Argo CD Server compon
 Name | Default | Description
 --- | --- | ---
 [Autoscale](#server-autoscale-options) | [Object] | Server autoscale configuration options.
+[ExtraCommandArgs](#server-command-arguments) | [Empty] | List of arguments that will be added to the existing arguments set by the operator.
 [GRPC](#server-grpc-options) | [Object] | GRPC configuration options.
 Host | example-argocd | The hostname to use for Ingress/Route resources.
 [Ingress](#server-ingress-options) | [Object] | Ingress configuration for the Argo CD Server component.
 Insecure | false | Toggles the insecure flag for Argo CD Server.
 Resources | [Empty] | The container compute resources.
+Replicas | [Empty] | The number of replicas for the ArgoCD Server. Must be greater than equal to 0. If Autoscale is enabled, Replicas is ignored.
 [Route](#server-route-options) | [Object] | Route configuration options.
 Service.Type | ClusterIP | The ServiceType to use for the Service resource.
 LogLevel | info | The log level to be used by the ArgoCD Server component. Valid options are debug, info, error, and warn.
@@ -987,6 +1111,33 @@ Name | Default | Description
 --- | --- | ---
 Enabled | false | Toggle Autoscaling support globally for the Argo CD server component.
 HPA | [Object] | HorizontalPodAutoscaler options for the Argo CD Server component.
+
+### Server Command Arguments
+
+Allows a user to pass arguments to Argo CD Server command.
+
+Name | Default | Description
+--- | --- | ---
+ExtraCommandArgs | [Empty] | List of arguments that will be added to the existing arguments set by the operator.
+
+!!! note
+    ExtraCommandArgs will not be added, if one of these commands is already part of the server command with same or different value.
+
+### Server Command Arguments Example
+
+``` yaml
+apiVersion: argoproj.io/v1alpha1
+kind: ArgoCD
+metadata:
+  name: example-argocd
+  labels:
+    example: server
+spec:
+  server:
+    extraCommandArgs:
+      - --rootpath
+      - /argocd
+```
 
 ### Server GRPC Options
 
@@ -1055,6 +1206,9 @@ spec:
           kind: Deployment
           name: example-argocd-server
         targetCPUUtilizationPercentage: 50
+    extraCommandArgs:
+      - --rootpath
+      - /argocd
     grpc:
       host: example-argocd-grpc
       ingress: false
@@ -1062,6 +1216,7 @@ spec:
     ingress:
       enabled: false
     insecure: false
+    replicas: 1
     resources: {}
     route:
       annotations: {}
@@ -1096,33 +1251,20 @@ spec:
 
 ## Single sign-on Options
 
+!!! warning
+    `.spec.sso.Image`, `.spec.sso.Version`, `.spec.sso.Resources` and `.spec.sso.verifyTLS` are deprecated and support will be removed in Argo CD operator v0.6.0. Please use equivalent fields under `.spec.sso.keycloak` to configure your keycloak instance.
+
 The following properties are available for configuring the Single sign-on component.
 
 Name | Default | Description
 --- | --- | ---
-Image | `registry.redhat.io/rh-sso-7/sso74-openshift-rhel8` | The container image for keycloak. This overrides the `ARGOCD_KEYCLOAK_IMAGE` environment variable.
-Provider | [Empty] | The name of the provider used to configure Single sign-on. For now the only supported option is keycloak.
+Image | OpenShift - `registry.redhat.io/rh-sso-7/sso75-openshift-rhel8` <br/> Kuberentes - `quay.io/keycloak/keycloak` | The container image for keycloak. This overrides the `ARGOCD_KEYCLOAK_IMAGE` environment variable.
+[Keycloak](#keycloak-options) | [Object] | Configuration options for Keycloak SSO provider
+[Dex](#dex-options) | [Object] | Configuration options for Dex SSO provider
+Provider | [Empty] | The name of the provider used to configure Single sign-on. For now the supported options are Dex and keycloak.
 Resources | `Requests`: CPU=500m, Mem=512Mi, `Limits`: CPU=1000m, Mem=1024Mi | The container compute resources.
 VerifyTLS | true | Whether to enforce strict TLS checking when communicating with Keycloak service.
-Version | `sha256:39d752173fc97c29373cd44477b48bcb078531def0a897ee81a60e8d1d0212cc` | The tag to use with the keycloak container image.
-
-### Single sign-on Example
-
-The following example uses keycloak as Single sign-on option for Argo CD.
-
-``` yaml
-apiVersion: argoproj.io/v1alpha1
-kind: ArgoCD
-metadata:
-  name: example-argocd
-  labels:
-    example: status-badge-enabled
-spec:
-  sso:
-    provider: keycloak
-```
-
-Please refer to the keycloak user guide to learn more about configuring keycloak as a Single sign-on provider.
+Version | OpenShift - `sha256:720a7e4c4926c41c1219a90daaea3b971a3d0da5a152a96fed4fb544d80f52e3` (7.5.1) <br/> Kubernetes - `sha256:64fb81886fde61dee55091e6033481fa5ccdac62ae30a4fd29b54eb5e97df6a9` (15.0.2) | The tag to use with the keycloak container image.
 
 ## TLS Options
 
@@ -1151,6 +1293,28 @@ spec:
       configMapName: example-argocd-ca
       secretName: example-argocd-ca
     initialCerts: []
+```
+
+### IntialCerts Example
+
+Initial set of repository certificates to be configured in Argo CD upon creation of the cluster.
+
+This property maps directly to the data field in the argocd-tls-certs-cm ConfigMap. Updating this property after the cluster has been created has no affect and should be used only as a means to initialize the cluster with the value provided. Updating new certificates should then be made through the Argo CD web UI or CLI.
+
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: ArgoCD
+metadata:
+  name: example-argocd
+  labels:
+    example: intialCerts
+spec:
+  tls:
+    ca: {}
+    initialCerts:
+      test.example.com: |
+        -----BEGIN CERTIFICATE-----
+        -----END CERTIFICATE-----
 ```
 
 ## Users Anonymous Enabled
@@ -1191,4 +1355,29 @@ metadata:
     example: version
 spec:
   version: v1.7.7
+```
+
+## Banner
+
+The following properties are available for configuring a [UI banner message](https://argo-cd.readthedocs.io/en/stable/operator-manual/custom-styles/#banners). 
+
+Name | Default | Description
+--- | --- | ---
+Banner.Content | [Empty] | The banner message content (required if a banner should be displayed).
+BAnner.URL.SecretName | [Empty] | The banner message link URL (optional).
+
+### Banner Example
+The following example enables a UI banner with message content and URL.
+
+``` yaml
+apiVersion: argoproj.io/v1alpha1
+kind: ArgoCD
+metadata:
+  name: example-argocd
+  labels:
+    example: version
+spec:
+  banner:
+    content: "Custom Styles - Banners"
+    url: "https://argo-cd.readthedocs.io/en/stable/operator-manual/custom-styles/#banners"
 ```

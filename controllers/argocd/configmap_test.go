@@ -17,19 +17,19 @@ package argocd
 import (
 	"context"
 	"fmt"
-	"os"
 	"reflect"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/stretchr/testify/assert"
 	"gopkg.in/yaml.v2"
-	"gotest.tools/assert"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
+	"github.com/argoproj-labs/argocd-operator/api/v1alpha1"
 	argoprojv1alpha1 "github.com/argoproj-labs/argocd-operator/api/v1alpha1"
 	"github.com/argoproj-labs/argocd-operator/common"
 	"github.com/argoproj-labs/argocd-operator/controllers/argoutil"
@@ -42,10 +42,10 @@ func TestReconcileArgoCD_reconcileTLSCerts(t *testing.T) {
 	a := makeTestArgoCD(initialCerts(t, "root-ca.example.com"))
 	r := makeTestReconciler(t, a)
 
-	assert.NilError(t, r.reconcileTLSCerts(a))
+	assert.NoError(t, r.reconcileTLSCerts(a))
 
 	configMap := &corev1.ConfigMap{}
-	assert.NilError(t, r.Client.Get(
+	assert.NoError(t, r.Client.Get(
 		context.TODO(),
 		types.NamespacedName{
 			Name:      common.ArgoCDTLSCertsConfigMapName,
@@ -59,17 +59,15 @@ func TestReconcileArgoCD_reconcileTLSCerts(t *testing.T) {
 	}
 }
 
-func TestReconcileArgoCD_reconcileTLSCerts_withUpdate(t *testing.T) {
+func TestReconcileArgoCD_reconcileTLSCerts_configMapUpdate(t *testing.T) {
 	logf.SetLogger(ZapLogger(true))
-	a := makeTestArgoCD()
+	a := makeTestArgoCD(initialCerts(t, "root-ca.example.com"))
 	r := makeTestReconciler(t, a)
-	assert.NilError(t, r.reconcileTLSCerts(a))
 
-	a = makeTestArgoCD(initialCerts(t, "testing.example.com"))
-	assert.NilError(t, r.reconcileTLSCerts(a))
+	assert.NoError(t, r.reconcileTLSCerts(a))
 
 	configMap := &corev1.ConfigMap{}
-	assert.NilError(t, r.Client.Get(
+	assert.NoError(t, r.Client.Get(
 		context.TODO(),
 		types.NamespacedName{
 			Name:      common.ArgoCDTLSCertsConfigMapName,
@@ -77,7 +75,48 @@ func TestReconcileArgoCD_reconcileTLSCerts_withUpdate(t *testing.T) {
 		},
 		configMap))
 
-	want := []string{"testing.example.com"}
+	want := []string{"root-ca.example.com"}
+	if k := stringMapKeys(configMap.Data); !reflect.DeepEqual(want, k) {
+		t.Fatalf("got %#v, want %#v\n", k, want)
+	}
+
+	// update a new cert in argocd-tls-certs-cm
+	testPEM := generateEncodedPEM(t, "example.com")
+
+	configMap.Data["example.com"] = string(testPEM)
+	assert.NoError(t, r.Client.Update(context.TODO(), configMap))
+
+	// verify that a new reconciliation does not remove example.com from
+	// argocd-tls-certs-cm
+	assert.NoError(t, r.reconcileTLSCerts(a))
+
+	want = []string{"example.com", "root-ca.example.com"}
+	if k := stringMapKeys(configMap.Data); !reflect.DeepEqual(want, k) {
+		t.Fatalf("got %#v, want %#v\n", k, want)
+	}
+}
+
+func TestReconcileArgoCD_reconcileTLSCerts_withInitialCertsUpdate(t *testing.T) {
+	logf.SetLogger(ZapLogger(true))
+	a := makeTestArgoCD()
+	r := makeTestReconciler(t, a)
+	assert.NoError(t, r.reconcileTLSCerts(a))
+
+	a = makeTestArgoCD(initialCerts(t, "testing.example.com"))
+	assert.NoError(t, r.reconcileTLSCerts(a))
+
+	configMap := &corev1.ConfigMap{}
+	assert.NoError(t, r.Client.Get(
+		context.TODO(),
+		types.NamespacedName{
+			Name:      common.ArgoCDTLSCertsConfigMapName,
+			Namespace: a.Namespace,
+		},
+		configMap))
+
+	// Any certs added to .spec.tls.intialCerts of Argo CD CR after the cluster creation
+	// should not affect the argocd-tls-certs-cm configmap.
+	want := []string{}
 	if k := stringMapKeys(configMap.Data); !reflect.DeepEqual(want, k) {
 		t.Fatalf("got %#v, want %#v\n", k, want)
 	}
@@ -85,41 +124,87 @@ func TestReconcileArgoCD_reconcileTLSCerts_withUpdate(t *testing.T) {
 
 func TestReconcileArgoCD_reconcileArgoConfigMap(t *testing.T) {
 	logf.SetLogger(ZapLogger(true))
-	a := makeTestArgoCD()
-	r := makeTestReconciler(t, a)
 
-	err := r.reconcileArgoConfigMap(a)
-	assert.NilError(t, err)
-
-	cm := &corev1.ConfigMap{}
-	err = r.Client.Get(context.TODO(), types.NamespacedName{
-		Name:      common.ArgoCDConfigMapName,
-		Namespace: testNamespace,
-	}, cm)
-	assert.NilError(t, err)
-
-	want := map[string]string{
-		"application.instanceLabelKey": common.ArgoCDDefaultApplicationInstanceLabelKey,
-		"admin.enabled":                "true",
-		"configManagementPlugins":      "",
-		"dex.config":                   "",
-		"ga.anonymizeusers":            "false",
-		"ga.trackingid":                "",
-		"help.chatText":                "Chat now!",
-		"help.chatUrl":                 "https://mycorp.slack.com/argo-cd",
-		"kustomize.buildOptions":       "",
-		"oidc.config":                  "",
-		"repositories":                 "",
-		"repository.credentials":       "",
-		"resource.inclusions":          "",
-		"resource.exclusions":          "",
-		"statusbadge.enabled":          "false",
-		"url":                          "https://argocd-server",
-		"users.anonymous.enabled":      "false",
+	defaultConfigMapData := map[string]string{
+		"application.instanceLabelKey":       common.ArgoCDDefaultApplicationInstanceLabelKey,
+		"application.resourceTrackingMethod": argoprojv1alpha1.ResourceTrackingMethodLabel.String(),
+		"admin.enabled":                      "true",
+		"configManagementPlugins":            "",
+		"dex.config":                         "",
+		"ga.anonymizeusers":                  "false",
+		"ga.trackingid":                      "",
+		"help.chatText":                      "Chat now!",
+		"help.chatUrl":                       "https://mycorp.slack.com/argo-cd",
+		"kustomize.buildOptions":             "",
+		"oidc.config":                        "",
+		"repositories":                       "",
+		"repository.credentials":             "",
+		"resource.inclusions":                "",
+		"resource.exclusions":                "",
+		"statusbadge.enabled":                "false",
+		"url":                                "https://argocd-server",
+		"users.anonymous.enabled":            "false",
 	}
 
-	if diff := cmp.Diff(want, cm.Data); diff != "" {
-		t.Fatalf("reconcileArgoConfigMap failed:\n%s", diff)
+	cmdTests := []struct {
+		name     string
+		opts     []argoCDOpt
+		dataDiff map[string]string
+	}{
+		{
+			"defaults",
+			[]argoCDOpt{},
+			map[string]string{},
+		},
+		{
+			"with-banner",
+			[]argoCDOpt{func(a *argoprojv1alpha1.ArgoCD) {
+				a.Spec.Banner = &argoprojv1alpha1.Banner{
+					Content: "Custom Styles - Banners",
+				}
+			}},
+			map[string]string{
+				"users.anonymous.enabled": "false",
+				"ui.bannercontent":        "Custom Styles - Banners",
+			},
+		},
+		{
+			"with-banner-and-url",
+			[]argoCDOpt{func(a *argoprojv1alpha1.ArgoCD) {
+				a.Spec.Banner = &argoprojv1alpha1.Banner{
+					Content: "Custom Styles - Banners",
+					URL:     "https://argo-cd.readthedocs.io/en/stable/operator-manual/custom-styles/#banners",
+				}
+			}},
+			map[string]string{
+				"ui.bannercontent": "Custom Styles - Banners",
+				"ui.bannerurl":     "https://argo-cd.readthedocs.io/en/stable/operator-manual/custom-styles/#banners",
+			},
+		},
+	}
+
+	for _, tt := range cmdTests {
+		a := makeTestArgoCD(tt.opts...)
+		a.Spec.SSO = &argoprojv1alpha1.ArgoCDSSOSpec{
+			Provider: argoprojv1alpha1.SSOProviderTypeDex,
+		}
+		r := makeTestReconciler(t, a)
+
+		err := r.reconcileArgoConfigMap(a)
+		assert.NoError(t, err)
+
+		cm := &corev1.ConfigMap{}
+		err = r.Client.Get(context.TODO(), types.NamespacedName{
+			Name:      common.ArgoCDConfigMapName,
+			Namespace: testNamespace,
+		}, cm)
+		assert.NoError(t, err)
+
+		want := merge(defaultConfigMapData, tt.dataDiff)
+
+		if diff := cmp.Diff(want, cm.Data); diff != "" {
+			t.Fatalf("reconcileArgoConfigMap (%s) failed:\n%s", tt.name, diff)
+		}
 	}
 }
 
@@ -137,17 +222,17 @@ func TestReconcileArgoCD_reconcileEmptyArgoConfigMap(t *testing.T) {
 	}
 
 	err := r.Client.Create(context.TODO(), emptyArgoConfigmap)
-	assert.NilError(t, err)
+	assert.NoError(t, err)
 
 	err = r.reconcileArgoConfigMap(a)
-	assert.NilError(t, err)
+	assert.NoError(t, err)
 
 	cm := &corev1.ConfigMap{}
 	err = r.Client.Get(context.TODO(), types.NamespacedName{
 		Name:      common.ArgoCDConfigMapName,
 		Namespace: testNamespace,
 	}, cm)
-	assert.NilError(t, err)
+	assert.NoError(t, err)
 }
 
 func TestReconcileArgoCDCM_withRepoCredentials(t *testing.T) {
@@ -175,13 +260,13 @@ func TestReconcileArgoCDCM_withRepoCredentials(t *testing.T) {
 	r := makeTestReconciler(t, a, cm)
 
 	err := r.reconcileArgoConfigMap(a)
-	assert.NilError(t, err)
+	assert.NoError(t, err)
 
 	err = r.Client.Get(context.TODO(), types.NamespacedName{
 		Name:      common.ArgoCDConfigMapName,
 		Namespace: testNamespace,
 	}, cm)
-	assert.NilError(t, err)
+	assert.NoError(t, err)
 
 	if got := cm.Data[common.ArgoCDKeyRepositoryCredentials]; got != a.Spec.RepositoryCredentials {
 		t.Fatalf("reconcileArgoConfigMap failed: got %s, want %s", got, a.Spec.RepositoryCredentials)
@@ -196,14 +281,14 @@ func TestReconcileArgoCD_reconcileArgoConfigMap_withDisableAdmin(t *testing.T) {
 	r := makeTestReconciler(t, a)
 
 	err := r.reconcileArgoConfigMap(a)
-	assert.NilError(t, err)
+	assert.NoError(t, err)
 
 	cm := &corev1.ConfigMap{}
 	err = r.Client.Get(context.TODO(), types.NamespacedName{
 		Name:      common.ArgoCDConfigMapName,
 		Namespace: testNamespace,
 	}, cm)
-	assert.NilError(t, err)
+	assert.NoError(t, err)
 
 	if c := cm.Data["admin.enabled"]; c != "false" {
 		t.Fatalf("reconcileArgoConfigMap failed got %q, want %q", c, "false")
@@ -211,87 +296,303 @@ func TestReconcileArgoCD_reconcileArgoConfigMap_withDisableAdmin(t *testing.T) {
 }
 
 func TestReconcileArgoCD_reconcileArgoConfigMap_withDexConnector(t *testing.T) {
-	restoreEnv(t)
 	logf.SetLogger(ZapLogger(true))
-	a := makeTestArgoCD(func(a *argoprojv1alpha1.ArgoCD) {
-		a.Spec.Dex.OpenShiftOAuth = true
-	})
-	sa := &corev1.ServiceAccount{
-		TypeMeta:   metav1.TypeMeta{Kind: "ServiceAccount", APIVersion: "v1"},
-		ObjectMeta: metav1.ObjectMeta{Name: "argocd-argocd-dex-server", Namespace: "argocd"},
-		Secrets: []corev1.ObjectReference{{
-			Name: "token",
-		}},
+
+	tests := []struct {
+		name             string
+		setEnvVarFunc    func(*testing.T, string)
+		envVar           string
+		updateCrSpecFunc func(cr *argoprojv1alpha1.ArgoCD)
+	}{
+		{
+			name: "dex config using .spec.dex + disable_dex",
+			setEnvVarFunc: func(t *testing.T, envVar string) {
+				t.Setenv("DISABLE_DEX", envVar)
+			},
+			envVar:           "false",
+			updateCrSpecFunc: nil,
+		},
+		{
+			name:          "dex config using .spec.sso.provider=dex + .spec.sso.dex",
+			setEnvVarFunc: nil,
+			envVar:        "",
+			updateCrSpecFunc: func(cr *argoprojv1alpha1.ArgoCD) {
+				cr.Spec.SSO = &v1alpha1.ArgoCDSSOSpec{
+					Provider: v1alpha1.SSOProviderTypeDex,
+					Dex: &v1alpha1.ArgoCDDexSpec{
+						OpenShiftOAuth: true,
+					},
+				}
+			},
+		},
+		{
+			name: "dex config using .spec.sso.provider=dex + .spec.sso.dex + DISABLE_DEX=false",
+			setEnvVarFunc: func(t *testing.T, envVar string) {
+				t.Setenv("DISABLE_DEX", envVar)
+			},
+			envVar: "false",
+			updateCrSpecFunc: func(cr *argoprojv1alpha1.ArgoCD) {
+				cr.Spec.SSO = &v1alpha1.ArgoCDSSOSpec{
+					Provider: v1alpha1.SSOProviderTypeDex,
+					Dex: &v1alpha1.ArgoCDDexSpec{
+						OpenShiftOAuth: true,
+					},
+				}
+			},
+		},
 	}
 
-	secret := argoutil.NewSecretWithName(a, "token")
-	r := makeTestReconciler(t, a, sa, secret)
-	err := r.reconcileArgoConfigMap(a)
-	assert.NilError(t, err)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			sa := &corev1.ServiceAccount{
+				TypeMeta:   metav1.TypeMeta{Kind: "ServiceAccount", APIVersion: "v1"},
+				ObjectMeta: metav1.ObjectMeta{Name: "argocd-argocd-dex-server", Namespace: "argocd"},
+				Secrets: []corev1.ObjectReference{{
+					Name: "token",
+				}},
+			}
 
-	cm := &corev1.ConfigMap{}
-	err = r.Client.Get(context.TODO(), types.NamespacedName{
-		Name:      common.ArgoCDConfigMapName,
-		Namespace: testNamespace,
-	}, cm)
-	assert.NilError(t, err)
+			a := makeTestArgoCD(func(a *argoprojv1alpha1.ArgoCD) {
+				a.Spec.Dex = &v1alpha1.ArgoCDDexSpec{
+					OpenShiftOAuth: false,
+				}
+			})
 
-	dex, ok := cm.Data["dex.config"]
-	if !ok {
-		t.Fatal("reconcileArgoConfigMap with dex failed")
+			secret := argoutil.NewSecretWithName(a, "token")
+			r := makeTestReconciler(t, a, sa, secret)
+
+			if test.setEnvVarFunc != nil {
+				test.setEnvVarFunc(t, test.envVar)
+				a.Spec.Dex.OpenShiftOAuth = true
+			}
+
+			if test.updateCrSpecFunc != nil {
+				test.updateCrSpecFunc(a)
+				a.Spec.Dex = &v1alpha1.ArgoCDDexSpec{}
+			}
+			err := r.reconcileArgoConfigMap(a)
+			assert.NoError(t, err)
+
+			cm := &corev1.ConfigMap{}
+			err = r.Client.Get(context.TODO(), types.NamespacedName{
+				Name:      common.ArgoCDConfigMapName,
+				Namespace: testNamespace,
+			}, cm)
+			assert.NoError(t, err)
+
+			dex, ok := cm.Data["dex.config"]
+			if !ok {
+				t.Fatal("reconcileArgoConfigMap with dex failed")
+			}
+
+			m := make(map[string]interface{})
+			err = yaml.Unmarshal([]byte(dex), &m)
+			assert.NoError(t, err, fmt.Sprintf("failed to unmarshal %s", dex))
+
+			connectors, ok := m["connectors"]
+			if !ok {
+				t.Fatal("no connectors found in dex.config")
+			}
+			dexConnector := connectors.([]interface{})[0].(map[interface{}]interface{})
+			config := dexConnector["config"]
+			assert.Equal(t, config.(map[interface{}]interface{})["clientID"], "system:serviceaccount:argocd:argocd-argocd-dex-server")
+		})
 	}
 
-	m := make(map[string]interface{})
-	err = yaml.Unmarshal([]byte(dex), &m)
-	assert.NilError(t, err, fmt.Sprintf("failed to unmarshal %s", dex))
-
-	connectors, ok := m["connectors"]
-	if !ok {
-		t.Fatal("no connectors found in dex.config")
-	}
-	dexConnector := connectors.([]interface{})[0].(map[interface{}]interface{})
-	config := dexConnector["config"]
-	assert.Equal(t, config.(map[interface{}]interface{})["clientID"], "system:serviceaccount:argocd:argocd-argocd-dex-server")
 }
 
 func TestReconcileArgoCD_reconcileArgoConfigMap_withDexDisabled(t *testing.T) {
-	restoreEnv(t)
 	logf.SetLogger(ZapLogger(true))
-	a := makeTestArgoCD()
-	r := makeTestReconciler(t, a)
 
-	os.Setenv("DISABLE_DEX", "true")
-	err := r.reconcileArgoConfigMap(a)
-	assert.NilError(t, err)
+	tests := []struct {
+		name          string
+		setEnvVarFunc func(*testing.T, string)
+		argoCD        *argoprojv1alpha1.ArgoCD
+	}{
+		{
+			name: "dex disabled using DISABLE_DEX",
+			setEnvVarFunc: func(t *testing.T, envVar string) {
+				t.Setenv("DISABLE_DEX", envVar)
+			},
+			argoCD: makeTestArgoCD(func(cr *argoprojv1alpha1.ArgoCD) {
+				cr.Spec.Dex = &v1alpha1.ArgoCDDexSpec{
+					OpenShiftOAuth: false,
+				}
+			}),
+		},
+		{
+			name:          "dex disabled by removing .spec.sso",
+			setEnvVarFunc: nil,
+			argoCD: makeTestArgoCD(func(cr *argoprojv1alpha1.ArgoCD) {
+				cr.Spec.SSO = nil
+			}),
+		},
+		{
+			name:          "dex disabled by switching provider",
+			setEnvVarFunc: nil,
+			argoCD: makeTestArgoCD(func(cr *argoprojv1alpha1.ArgoCD) {
+				cr.Spec.SSO = &v1alpha1.ArgoCDSSOSpec{
+					Provider: v1alpha1.SSOProviderTypeKeycloak,
+				}
+			}),
+		},
+	}
 
-	cm := &corev1.ConfigMap{}
-	err = r.Client.Get(context.TODO(), types.NamespacedName{
-		Name:      common.ArgoCDConfigMapName,
-		Namespace: testNamespace,
-	}, cm)
-	assert.NilError(t, err)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			r := makeTestReconciler(t, test.argoCD)
+			if test.setEnvVarFunc != nil {
+				test.setEnvVarFunc(t, "true")
+			}
 
-	if c, ok := cm.Data["dex.config"]; ok {
-		t.Fatalf("reconcileArgoConfigMap failed, dex.config = %q", c)
+			err := r.reconcileArgoConfigMap(test.argoCD)
+			assert.NoError(t, err)
+
+			cm := &corev1.ConfigMap{}
+			err = r.Client.Get(context.TODO(), types.NamespacedName{
+				Name:      common.ArgoCDConfigMapName,
+				Namespace: testNamespace,
+			}, cm)
+			assert.NoError(t, err)
+
+			if c, ok := cm.Data["dex.config"]; ok {
+				t.Fatalf("reconcileArgoConfigMap failed, dex.config = %q", c)
+			}
+		})
 	}
 }
-func TestReconcileArgoCD_reconcileArgoConfigMap_withMultipleSSOConfigured(t *testing.T) {
+
+// When dex is enabled, dexConfig should be present in argocd-cm, when disabled, it should be removed (except when .spec.dex.openShiftOAuth is true)
+func TestReconcileArgoCD_reconcileArgoConfigMap_dexConfigDeletedwhenDexDisabled(t *testing.T) {
 	logf.SetLogger(ZapLogger(true))
-	a := makeTestArgoCDForKeycloakWithDex()
-	r := makeTestReconciler(t, a)
 
-	err := r.reconcileArgoConfigMap(a)
-	assert.NilError(t, err)
+	tests := []struct {
+		name              string
+		setEnvVarFunc     func(*testing.T, string)
+		updateCrFunc      func(cr *argoprojv1alpha1.ArgoCD)
+		argoCD            *argoprojv1alpha1.ArgoCD
+		wantConfigRemoved bool
+	}{
+		{
+			name: "dex disabled using DISABLE_DEX, config removed",
+			setEnvVarFunc: func(t *testing.T, envVar string) {
+				t.Setenv("DISABLE_DEX", envVar)
+			},
+			updateCrFunc: func(cr *argoprojv1alpha1.ArgoCD) {
+				cr.Spec.Dex = &v1alpha1.ArgoCDDexSpec{
+					OpenShiftOAuth: false,
+				}
+			},
+			argoCD: makeTestArgoCD(func(cr *argoprojv1alpha1.ArgoCD) {
+				cr.Spec.Dex = &v1alpha1.ArgoCDDexSpec{
+					OpenShiftOAuth: true,
+				}
+			}),
+			wantConfigRemoved: true,
+		},
+		{
+			name: "dex disabled using DISABLE_DEX, config not removed",
+			setEnvVarFunc: func(t *testing.T, envVar string) {
+				t.Setenv("DISABLE_DEX", envVar)
+			},
+			updateCrFunc: func(cr *argoprojv1alpha1.ArgoCD) {
+				cr.Spec.Dex = &v1alpha1.ArgoCDDexSpec{
+					OpenShiftOAuth: true,
+				}
+			},
+			argoCD: makeTestArgoCD(func(cr *argoprojv1alpha1.ArgoCD) {
+				cr.Spec.Dex = &v1alpha1.ArgoCDDexSpec{
+					OpenShiftOAuth: true,
+				}
+			}),
+			wantConfigRemoved: false,
+		},
+		{
+			name:          "dex disabled by removing .spec.sso.provider",
+			setEnvVarFunc: nil,
+			updateCrFunc: func(cr *argoprojv1alpha1.ArgoCD) {
+				cr.Spec.SSO = nil
+			},
+			argoCD: makeTestArgoCD(func(cr *argoprojv1alpha1.ArgoCD) {
+				cr.Spec.SSO = &v1alpha1.ArgoCDSSOSpec{
+					Provider: argoprojv1alpha1.SSOProviderTypeDex,
+					Dex: &v1alpha1.ArgoCDDexSpec{
+						Config: "test-dex-config",
+					},
+				}
+			}),
+			wantConfigRemoved: true,
+		},
+		{
+			name:          "dex disabled by switching provider",
+			setEnvVarFunc: nil,
+			updateCrFunc: func(cr *argoprojv1alpha1.ArgoCD) {
+				cr.Spec.SSO = nil
+			},
+			argoCD: makeTestArgoCD(func(cr *argoprojv1alpha1.ArgoCD) {
+				cr.Spec.SSO = &v1alpha1.ArgoCDSSOSpec{
+					Provider: argoprojv1alpha1.SSOProviderTypeDex,
+					Dex: &v1alpha1.ArgoCDDexSpec{
+						OpenShiftOAuth: true,
+					},
+				}
+			}),
+			wantConfigRemoved: true,
+		},
+	}
 
-	cm := &corev1.ConfigMap{}
-	err = r.Client.Get(context.TODO(), types.NamespacedName{
-		Name:      common.ArgoCDConfigMapName,
-		Namespace: testNamespace,
-	}, cm)
-	assert.NilError(t, err)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			sa := &corev1.ServiceAccount{
+				TypeMeta:   metav1.TypeMeta{Kind: "ServiceAccount", APIVersion: "v1"},
+				ObjectMeta: metav1.ObjectMeta{Name: "argocd-argocd-dex-server", Namespace: "argocd"},
+				Secrets: []corev1.ObjectReference{{
+					Name: "token",
+				}},
+			}
+			secret := argoutil.NewSecretWithName(test.argoCD, "token")
 
-	if c, ok := cm.Data["dex.openShiftOAuth"]; !ok && len(c) != 0 {
-		t.Fatalf("reconcileArgoConfigMap didn't skip setting dex when keycloak is configured, dex.openShiftOAuth = %q", c)
+			r := makeTestReconciler(t, test.argoCD, sa, secret)
+			if test.setEnvVarFunc != nil {
+				test.setEnvVarFunc(t, "false")
+			}
+
+			err := r.reconcileArgoConfigMap(test.argoCD)
+			assert.NoError(t, err)
+
+			cm := &corev1.ConfigMap{}
+			err = r.Client.Get(context.TODO(), types.NamespacedName{
+				Name:      common.ArgoCDConfigMapName,
+				Namespace: testNamespace,
+			}, cm)
+			assert.NoError(t, err)
+
+			if _, ok := cm.Data["dex.config"]; !ok {
+				t.Fatalf("reconcileArgoConfigMap failed,could not find dexConfig")
+			}
+
+			if test.setEnvVarFunc != nil {
+				test.setEnvVarFunc(t, "true")
+			}
+			if test.updateCrFunc != nil {
+				test.updateCrFunc(test.argoCD)
+			}
+
+			err = r.reconcileDexConfiguration(cm, test.argoCD)
+			assert.NoError(t, err)
+
+			err = r.Client.Get(context.TODO(), types.NamespacedName{
+				Name:      common.ArgoCDConfigMapName,
+				Namespace: testNamespace,
+			}, cm)
+			assert.NoError(t, err)
+
+			if c, ok := cm.Data["dex.config"]; ok && c != "" {
+				if test.wantConfigRemoved {
+					t.Fatalf("reconcileArgoConfigMap failed, dex.config = %q", c)
+				}
+			}
+		})
 	}
 }
 
@@ -309,14 +610,14 @@ func TestReconcileArgoCD_reconcileArgoConfigMap_withKustomizeVersions(t *testing
 	r := makeTestReconciler(t, a)
 
 	err := r.reconcileArgoConfigMap(a)
-	assert.NilError(t, err)
+	assert.NoError(t, err)
 
 	cm := &corev1.ConfigMap{}
 	err = r.Client.Get(context.TODO(), types.NamespacedName{
 		Name:      common.ArgoCDConfigMapName,
 		Namespace: testNamespace,
 	}, cm)
-	assert.NilError(t, err)
+	assert.NoError(t, err)
 
 	if diff := cmp.Diff(cm.Data["kustomize.version.v4.1.0"], "/path/to/kustomize-4.1"); diff != "" {
 		t.Fatalf("failed to reconcile configmap:\n%s", diff)
@@ -331,38 +632,140 @@ func TestReconcileArgoCD_reconcileGPGKeysConfigMap(t *testing.T) {
 	r := makeTestReconciler(t, a)
 
 	err := r.reconcileGPGKeysConfigMap(a)
-	assert.NilError(t, err)
+	assert.NoError(t, err)
 
 	cm := &corev1.ConfigMap{}
 	err = r.Client.Get(context.TODO(), types.NamespacedName{
 		Name:      common.ArgoCDGPGKeysConfigMapName,
 		Namespace: testNamespace,
 	}, cm)
-	assert.NilError(t, err)
+	assert.NoError(t, err)
 	// Currently the gpg keys configmap is empty
+}
+
+func TestReconcileArgoCD_reconcileArgoConfigMap_withResourceTrackingMethod(t *testing.T) {
+	logf.SetLogger(ZapLogger(true))
+	a := makeTestArgoCD()
+	r := makeTestReconciler(t, a)
+
+	err := r.reconcileArgoConfigMap(a)
+	assert.NoError(t, err)
+
+	cm := &corev1.ConfigMap{}
+
+	t.Run("Check default tracking method", func(t *testing.T) {
+		err = r.Client.Get(context.TODO(), types.NamespacedName{
+			Name:      common.ArgoCDConfigMapName,
+			Namespace: testNamespace,
+		}, cm)
+		assert.NoError(t, err)
+
+		rtm, ok := cm.Data[common.ArgoCDKeyResourceTrackingMethod]
+		assert.Equal(t, argoprojv1alpha1.ResourceTrackingMethodLabel.String(), rtm)
+		assert.True(t, ok)
+	})
+
+	t.Run("Tracking method label", func(t *testing.T) {
+		err = r.Client.Get(context.TODO(), types.NamespacedName{
+			Name:      common.ArgoCDConfigMapName,
+			Namespace: testNamespace,
+		}, cm)
+		assert.NoError(t, err)
+
+		rtm, ok := cm.Data[common.ArgoCDKeyResourceTrackingMethod]
+		assert.Equal(t, argoprojv1alpha1.ResourceTrackingMethodLabel.String(), rtm)
+		assert.True(t, ok)
+	})
+
+	t.Run("Set tracking method to annotation+label", func(t *testing.T) {
+		a.Spec.ResourceTrackingMethod = argoprojv1alpha1.ResourceTrackingMethodAnnotationAndLabel.String()
+		err = r.reconcileArgoConfigMap(a)
+		assert.NoError(t, err)
+
+		err = r.Client.Get(context.TODO(), types.NamespacedName{
+			Name:      common.ArgoCDConfigMapName,
+			Namespace: testNamespace,
+		}, cm)
+		assert.NoError(t, err)
+
+		rtm, ok := cm.Data[common.ArgoCDKeyResourceTrackingMethod]
+		assert.True(t, ok)
+		assert.Equal(t, argoprojv1alpha1.ResourceTrackingMethodAnnotationAndLabel.String(), rtm)
+	})
+
+	t.Run("Set tracking method to annotation", func(t *testing.T) {
+		a.Spec.ResourceTrackingMethod = argoprojv1alpha1.ResourceTrackingMethodAnnotation.String()
+		err = r.reconcileArgoConfigMap(a)
+		assert.NoError(t, err)
+
+		err = r.Client.Get(context.TODO(), types.NamespacedName{
+			Name:      common.ArgoCDConfigMapName,
+			Namespace: testNamespace,
+		}, cm)
+		assert.NoError(t, err)
+
+		rtm, ok := cm.Data[common.ArgoCDKeyResourceTrackingMethod]
+		assert.True(t, ok)
+		assert.Equal(t, argoprojv1alpha1.ResourceTrackingMethodAnnotation.String(), rtm)
+	})
+
+	// Invalid value sets the default "label"
+	t.Run("Set tracking method to invalid value", func(t *testing.T) {
+		a.Spec.ResourceTrackingMethod = "anotaions"
+		err = r.reconcileArgoConfigMap(a)
+		assert.NoError(t, err)
+
+		err = r.Client.Get(context.TODO(), types.NamespacedName{
+			Name:      common.ArgoCDConfigMapName,
+			Namespace: testNamespace,
+		}, cm)
+		assert.NoError(t, err)
+
+		rtm, ok := cm.Data[common.ArgoCDKeyResourceTrackingMethod]
+		assert.True(t, ok)
+		assert.Equal(t, argoprojv1alpha1.ResourceTrackingMethodLabel.String(), rtm)
+	})
+
 }
 
 func TestReconcileArgoCD_reconcileArgoConfigMap_withResourceInclusions(t *testing.T) {
 	logf.SetLogger(ZapLogger(true))
 	customizations := "testing: testing"
+	updatedCustomizations := "updated-testing: updated-testing"
+
 	a := makeTestArgoCD(func(a *argoprojv1alpha1.ArgoCD) {
 		a.Spec.ResourceInclusions = customizations
 	})
 	r := makeTestReconciler(t, a)
 
 	err := r.reconcileArgoConfigMap(a)
-	assert.NilError(t, err)
+	assert.NoError(t, err)
 
 	cm := &corev1.ConfigMap{}
 	err = r.Client.Get(context.TODO(), types.NamespacedName{
 		Name:      common.ArgoCDConfigMapName,
 		Namespace: testNamespace,
 	}, cm)
-	assert.NilError(t, err)
+	assert.NoError(t, err)
 
 	if c := cm.Data["resource.inclusions"]; c != customizations {
 		t.Fatalf("reconcileArgoConfigMap failed got %q, want %q", c, customizations)
 	}
+
+	a.Spec.ResourceInclusions = updatedCustomizations
+	err = r.reconcileArgoConfigMap(a)
+	assert.NoError(t, err)
+
+	err = r.Client.Get(context.TODO(), types.NamespacedName{
+		Name:      common.ArgoCDConfigMapName,
+		Namespace: testNamespace,
+	}, cm)
+	assert.NoError(t, err)
+
+	if c := cm.Data["resource.inclusions"]; c != updatedCustomizations {
+		t.Fatalf("reconcileArgoConfigMap failed got %q, want %q", c, updatedCustomizations)
+	}
+
 }
 
 func TestReconcileArgoCD_reconcileArgoConfigMap_withResourceCustomizations(t *testing.T) {
@@ -374,16 +777,95 @@ func TestReconcileArgoCD_reconcileArgoConfigMap_withResourceCustomizations(t *te
 	r := makeTestReconciler(t, a)
 
 	err := r.reconcileArgoConfigMap(a)
-	assert.NilError(t, err)
+	assert.NoError(t, err)
 
 	cm := &corev1.ConfigMap{}
 	err = r.Client.Get(context.TODO(), types.NamespacedName{
 		Name:      common.ArgoCDConfigMapName,
 		Namespace: testNamespace,
 	}, cm)
-	assert.NilError(t, err)
+	assert.NoError(t, err)
 
 	if c := cm.Data["resource.customizations"]; c != customizations {
 		t.Fatalf("reconcileArgoConfigMap failed got %q, want %q", c, customizations)
 	}
+}
+
+func TestReconcileArgoCD_reconcileArgoConfigMap_withExtraConfig(t *testing.T) {
+	a := makeTestArgoCD()
+	r := makeTestReconciler(t, a)
+
+	err := r.reconcileArgoConfigMap(a)
+	assert.NoError(t, err)
+
+	// Verify Argo CD configmap is created.
+	cm := &corev1.ConfigMap{}
+	err = r.Client.Get(context.TODO(), types.NamespacedName{
+		Name:      common.ArgoCDConfigMapName,
+		Namespace: testNamespace,
+	}, cm)
+	assert.NoError(t, err)
+
+	// Verify that updates to the configmap are rejected(reconciled back to default) by the operator.
+	cm.Data["ping"] = "pong"
+	err = r.Client.Update(context.TODO(), cm)
+	assert.NoError(t, err)
+
+	err = r.reconcileArgoConfigMap(a)
+	assert.NoError(t, err)
+
+	err = r.Client.Get(context.TODO(), types.NamespacedName{
+		Name:      common.ArgoCDConfigMapName,
+		Namespace: testNamespace,
+	}, cm)
+	assert.NoError(t, err)
+
+	assert.Equal(t, cm.Data["ping"], "")
+
+	// Verify that operator updates argocd-cm according to ExtraConfig.
+	a.Spec.ExtraConfig = map[string]string{
+		"foo": "bar",
+	}
+
+	err = r.reconcileArgoConfigMap(a)
+	assert.NoError(t, err)
+
+	err = r.Client.Get(context.TODO(), types.NamespacedName{
+		Name:      common.ArgoCDConfigMapName,
+		Namespace: testNamespace,
+	}, cm)
+	assert.NoError(t, err)
+
+	assert.Equal(t, cm.Data["foo"], "bar")
+
+	// Verify that ExtraConfig overrides FirstClass entries
+	a.Spec.DisableAdmin = true
+	a.Spec.ExtraConfig["admin.enabled"] = "true"
+
+	err = r.reconcileArgoConfigMap(a)
+	assert.NoError(t, err)
+
+	err = r.Client.Get(context.TODO(), types.NamespacedName{
+		Name:      common.ArgoCDConfigMapName,
+		Namespace: testNamespace,
+	}, cm)
+
+	assert.NoError(t, err)
+	assert.Equal(t, cm.Data["admin.enabled"], "true")
+
+	// Verify that deletion of a field from ExtraConfig does not delete any existing configuration
+	// created by FirstClass citizens.
+	a.Spec.ExtraConfig = make(map[string]string, 0)
+
+	err = r.reconcileArgoConfigMap(a)
+	assert.NoError(t, err)
+
+	err = r.Client.Get(context.TODO(), types.NamespacedName{
+		Name:      common.ArgoCDConfigMapName,
+		Namespace: testNamespace,
+	}, cm)
+
+	assert.NoError(t, err)
+	assert.Equal(t, cm.Data["admin.enabled"], "false")
+
 }

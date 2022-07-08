@@ -1,0 +1,12 @@
+apiVersion: argoproj.io/v1alpha1
+kind: ArgoCD
+metadata:
+  name: example-argocd
+spec:
+  sso:
+    provider: keycloak
+    # uncomment the below line when running operator locally.
+    # verifyTLS: false 
+  server:
+    route:
+      enabled: true

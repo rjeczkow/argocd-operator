@@ -2,14 +2,16 @@ package argocd
 
 import (
 	"context"
-	"os"
+	b64 "encoding/base64"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
 
-	"gotest.tools/assert"
+	"github.com/stretchr/testify/assert"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/argoproj-labs/argocd-operator/api/v1alpha1"
 	argoprojv1alpha1 "github.com/argoproj-labs/argocd-operator/api/v1alpha1"
 	"github.com/argoproj-labs/argocd-operator/common"
 	"github.com/argoproj-labs/argocd-operator/controllers/argoutil"
@@ -45,8 +47,10 @@ var imageTests = []struct {
 		imageFunc: getDexContainerImage,
 		want:      dexTestImage,
 		opts: []argoCDOpt{func(a *argoprojv1alpha1.ArgoCD) {
-			a.Spec.Dex.Image = "testing/dex"
-			a.Spec.Dex.Version = "latest"
+			a.Spec.Dex = &v1alpha1.ArgoCDDexSpec{
+				Image:   "testing/dex",
+				Version: "latest",
+			}
 		}},
 	},
 	{
@@ -54,11 +58,7 @@ var imageTests = []struct {
 		imageFunc: getDexContainerImage,
 		want:      dexTestImage,
 		pre: func(t *testing.T) {
-			old := os.Getenv(common.ArgoCDDexImageEnvName)
-			t.Cleanup(func() {
-				os.Setenv(common.ArgoCDDexImageEnvName, old)
-			})
-			os.Setenv(common.ArgoCDDexImageEnvName, dexTestImage)
+			t.Setenv(common.ArgoCDDexImageEnvName, dexTestImage)
 		},
 	},
 	{
@@ -79,11 +79,7 @@ var imageTests = []struct {
 		imageFunc: getArgoContainerImage,
 		want:      argoTestImage,
 		pre: func(t *testing.T) {
-			old := os.Getenv(common.ArgoCDImageEnvName)
-			t.Cleanup(func() {
-				os.Setenv(common.ArgoCDImageEnvName, old)
-			})
-			os.Setenv(common.ArgoCDImageEnvName, argoTestImage)
+			t.Setenv(common.ArgoCDImageEnvName, argoTestImage)
 		},
 	},
 	{
@@ -105,11 +101,7 @@ var imageTests = []struct {
 		imageFunc: getGrafanaContainerImage,
 		want:      grafanaTestImage,
 		pre: func(t *testing.T) {
-			old := os.Getenv(common.ArgoCDGrafanaImageEnvName)
-			t.Cleanup(func() {
-				os.Setenv(common.ArgoCDGrafanaImageEnvName, old)
-			})
-			os.Setenv(common.ArgoCDGrafanaImageEnvName, grafanaTestImage)
+			t.Setenv(common.ArgoCDGrafanaImageEnvName, grafanaTestImage)
 		},
 	},
 	{
@@ -131,11 +123,7 @@ var imageTests = []struct {
 		imageFunc: getRedisContainerImage,
 		want:      redisTestImage,
 		pre: func(t *testing.T) {
-			old := os.Getenv(common.ArgoCDRedisImageEnvName)
-			t.Cleanup(func() {
-				os.Setenv(common.ArgoCDRedisImageEnvName, old)
-			})
-			os.Setenv(common.ArgoCDRedisImageEnvName, redisTestImage)
+			t.Setenv(common.ArgoCDRedisImageEnvName, redisTestImage)
 		},
 	},
 	{
@@ -159,11 +147,7 @@ var imageTests = []struct {
 		imageFunc: getRedisHAContainerImage,
 		want:      redisHATestImage,
 		pre: func(t *testing.T) {
-			old := os.Getenv(common.ArgoCDRedisHAImageEnvName)
-			t.Cleanup(func() {
-				os.Setenv(common.ArgoCDRedisHAImageEnvName, old)
-			})
-			os.Setenv(common.ArgoCDRedisHAImageEnvName, redisHATestImage)
+			t.Setenv(common.ArgoCDRedisHAImageEnvName, redisHATestImage)
 		},
 	},
 	{
@@ -187,11 +171,7 @@ var imageTests = []struct {
 		imageFunc: getRedisHAProxyContainerImage,
 		want:      redisHAProxyTestImage,
 		pre: func(t *testing.T) {
-			old := os.Getenv(common.ArgoCDRedisHAProxyImageEnvName)
-			t.Cleanup(func() {
-				os.Setenv(common.ArgoCDRedisHAProxyImageEnvName, old)
-			})
-			os.Setenv(common.ArgoCDRedisHAProxyImageEnvName, redisHAProxyTestImage)
+			t.Setenv(common.ArgoCDRedisHAProxyImageEnvName, redisHAProxyTestImage)
 		},
 	},
 }
@@ -259,7 +239,7 @@ func TestRemoveDeletionFinalizer(t *testing.T) {
 		a := makeTestArgoCD(addFinalizer(common.ArgoCDDeletionFinalizer))
 		r := makeTestReconciler(t, a)
 		err := r.removeDeletionFinalizer(a)
-		assert.NilError(t, err)
+		assert.NoError(t, err)
 		if a.IsDeletionFinalizerPresent() {
 			t.Fatal("Expected deletion finalizer to be removed")
 		}
@@ -277,7 +257,7 @@ func TestAddDeletionFinalizer(t *testing.T) {
 		a := makeTestArgoCD()
 		r := makeTestReconciler(t, a)
 		err := r.addDeletionFinalizer(a)
-		assert.NilError(t, err)
+		assert.NoError(t, err)
 		if !a.IsDeletionFinalizerPresent() {
 			t.Fatal("Expected deletion finalizer to be added")
 		}
@@ -294,13 +274,17 @@ func TestArgoCDInstanceSelector(t *testing.T) {
 	t.Run("Selector for a Valid name", func(t *testing.T) {
 		validName := "argocd-server"
 		selector, err := argocdInstanceSelector(validName)
-		assert.NilError(t, err)
+		assert.NoError(t, err)
 		assert.Equal(t, selector.String(), "app.kubernetes.io/managed-by=argocd-server")
 	})
 	t.Run("Selector for an Invalid name", func(t *testing.T) {
 		invalidName := "argocd-*/"
 		selector, err := argocdInstanceSelector(invalidName)
-		assert.ErrorContains(t, err, `failed to create a requirement for values[0][app.kubernetes.io/managed-by]: Invalid value: "argocd-*/`)
+		//assert.ErrorContains(t, err, `failed to create a requirement for values[0][app.kubernetes.io/managed-by]: Invalid value: "argocd-*/`)
+		//TODO: https://github.com/stretchr/testify/pull/1022 introduced ErrorContains, but is not yet available in a tagged release. Revert to ErrorContains once this becomes available
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), `failed to create a requirement for values[0][app.kubernetes.io/managed-by]: Invalid value: "argocd-*/`)
+
 		assert.Equal(t, selector, nil)
 	})
 }
@@ -422,7 +406,7 @@ func TestGetArgoApplicationControllerCommand(t *testing.T) {
 
 	for _, tt := range cmdTests {
 		cr := makeTestArgoCD(tt.opts...)
-		cmd := getArgoApplicationControllerCommand(cr)
+		cmd := getArgoApplicationControllerCommand(cr, false)
 
 		if !reflect.DeepEqual(cmd, tt.want) {
 			t.Fatalf("got %#v, want %#v", cmd, tt.want)
@@ -440,7 +424,7 @@ func TestDeleteRBACsForNamespace(t *testing.T) {
 
 	// create role with label
 	_, err := testClient.RbacV1().Roles(testNameSpace).Create(context.TODO(), role, metav1.CreateOptions{})
-	assert.NilError(t, err)
+	assert.NoError(t, err)
 
 	role2 := newRole("abc", policyRuleForApplicationController(), a)
 	role2.Namespace = testNameSpace
@@ -448,14 +432,14 @@ func TestDeleteRBACsForNamespace(t *testing.T) {
 
 	// create role without label
 	_, err = testClient.RbacV1().Roles(testNameSpace).Create(context.TODO(), role2, metav1.CreateOptions{})
-	assert.NilError(t, err)
+	assert.NoError(t, err)
 
 	roleBinding := newRoleBindingWithname("xyz", a)
 	roleBinding.Namespace = testNameSpace
 
 	// create roleBinding with label
 	_, err = testClient.RbacV1().RoleBindings(testNameSpace).Create(context.TODO(), roleBinding, metav1.CreateOptions{})
-	assert.NilError(t, err)
+	assert.NoError(t, err)
 
 	roleBinding2 := newRoleBindingWithname("abc", a)
 	roleBinding2.Namespace = testNameSpace
@@ -463,7 +447,39 @@ func TestDeleteRBACsForNamespace(t *testing.T) {
 
 	// create RoleBinding without label
 	_, err = testClient.RbacV1().RoleBindings(testNameSpace).Create(context.TODO(), roleBinding2, metav1.CreateOptions{})
-	assert.NilError(t, err)
+	assert.NoError(t, err)
+
+	// run deleteRBACsForNamespace
+	assert.NoError(t, deleteRBACsForNamespace(testNameSpace, testClient))
+
+	// role with the label should be deleted
+	_, err = testClient.RbacV1().Roles(testNameSpace).Get(context.TODO(), role.Name, metav1.GetOptions{})
+	//assert.ErrorContains(t, err, "not found")
+	//TODO: https://github.com/stretchr/testify/pull/1022 introduced ErrorContains, but is not yet available in a tagged release. Revert to ErrorContains once this becomes available
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "not found")
+
+	// role without the label should still exists, no error
+	_, err = testClient.RbacV1().Roles(testNameSpace).Get(context.TODO(), role2.Name, metav1.GetOptions{})
+	assert.NoError(t, err)
+
+	// roleBinding with the label should be deleted
+	_, err = testClient.RbacV1().Roles(testNameSpace).Get(context.TODO(), roleBinding.Name, metav1.GetOptions{})
+	//assert.ErrorContains(t, err, "not found")
+	//TODO: https://github.com/stretchr/testify/pull/1022 introduced ErrorContains, but is not yet available in a tagged release. Revert to ErrorContains once this becomes available
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "not found")
+
+	// roleBinding without the label should still exists, no error
+	_, err = testClient.RbacV1().Roles(testNameSpace).Get(context.TODO(), roleBinding2.Name, metav1.GetOptions{})
+	assert.NoError(t, err)
+
+}
+
+func TestRemoveManagedNamespaceFromClusterSecretAfterDeletion(t *testing.T) {
+	a := makeTestArgoCD()
+	testClient := testclient.NewSimpleClientset()
+	testNameSpace := "testNameSpace"
 
 	secret := argoutil.NewSecretWithSuffix(a, "xyz")
 	secret.Labels = map[string]string{common.ArgoCDSecretTypeLabel: "cluster"}
@@ -473,30 +489,17 @@ func TestDeleteRBACsForNamespace(t *testing.T) {
 	}
 
 	// create secret with the label
-	_, err = testClient.CoreV1().Secrets(a.Namespace).Create(context.TODO(), secret, metav1.CreateOptions{})
-	assert.NilError(t, err)
+	_, err := testClient.CoreV1().Secrets(a.Namespace).Create(context.TODO(), secret, metav1.CreateOptions{})
+	assert.NoError(t, err)
 
-	// run deleteRBACsForNamespace
-	assert.NilError(t, deleteRBACsForNamespace(a.Namespace, testNameSpace, testClient))
-
-	// role with the label should be deleted
-	_, err = testClient.RbacV1().Roles(testNameSpace).Get(context.TODO(), role.Name, metav1.GetOptions{})
-	assert.ErrorContains(t, err, "not found")
-	// role without the label should still exists, no error
-	_, err = testClient.RbacV1().Roles(testNameSpace).Get(context.TODO(), role2.Name, metav1.GetOptions{})
-	assert.NilError(t, err)
-
-	// roleBinding with the label should be deleted
-	_, err = testClient.RbacV1().Roles(testNameSpace).Get(context.TODO(), roleBinding.Name, metav1.GetOptions{})
-	assert.ErrorContains(t, err, "not found")
-	// roleBinding without the label should still exists, no error
-	_, err = testClient.RbacV1().Roles(testNameSpace).Get(context.TODO(), roleBinding2.Name, metav1.GetOptions{})
-	assert.NilError(t, err)
+	// run deleteManagedNamespaceFromClusterSecret
+	assert.NoError(t, deleteManagedNamespaceFromClusterSecret(a.Namespace, testNameSpace, testClient))
 
 	// secret should still exists with updated list of namespaces
 	s, err := testClient.CoreV1().Secrets(a.Namespace).Get(context.TODO(), secret.Name, metav1.GetOptions{})
-	assert.NilError(t, err)
-	assert.DeepEqual(t, string(s.Data["namespaces"]), "testNamespace2")
+	assert.NoError(t, err)
+	assert.Equal(t, string(s.Data["namespaces"]), "testNamespace2")
+
 }
 
 func TestRemoveManagedByLabelFromNamespaces(t *testing.T) {
@@ -506,7 +509,7 @@ func TestRemoveManagedByLabelFromNamespaces(t *testing.T) {
 		Name: a.Namespace,
 	}}
 	err := r.Client.Create(context.TODO(), nsArgocd)
-	assert.NilError(t, err)
+	assert.NoError(t, err)
 
 	ns := &v1.Namespace{ObjectMeta: metav1.ObjectMeta{
 		Name: "testNamespace",
@@ -516,7 +519,7 @@ func TestRemoveManagedByLabelFromNamespaces(t *testing.T) {
 	}
 
 	err = r.Client.Create(context.TODO(), ns)
-	assert.NilError(t, err)
+	assert.NoError(t, err)
 
 	ns2 := &v1.Namespace{ObjectMeta: metav1.ObjectMeta{
 		Name: "testNamespace2",
@@ -526,7 +529,7 @@ func TestRemoveManagedByLabelFromNamespaces(t *testing.T) {
 	}
 
 	err = r.Client.Create(context.TODO(), ns2)
-	assert.NilError(t, err)
+	assert.NoError(t, err)
 
 	ns3 := &v1.Namespace{ObjectMeta: metav1.ObjectMeta{
 		Name: "testNamespace3",
@@ -536,14 +539,14 @@ func TestRemoveManagedByLabelFromNamespaces(t *testing.T) {
 	}
 
 	err = r.Client.Create(context.TODO(), ns3)
-	assert.NilError(t, err)
+	assert.NoError(t, err)
 
 	err = r.removeManagedByLabelFromNamespaces(a.Namespace)
-	assert.NilError(t, err)
+	assert.NoError(t, err)
 
 	nsList := &v1.NamespaceList{}
 	err = r.Client.List(context.TODO(), nsList)
-	assert.NilError(t, err)
+	assert.NoError(t, err)
 	for _, n := range nsList.Items {
 		if n.Name == ns3.Name {
 			_, ok := n.Labels[common.ArgoCDManagedByLabel]
@@ -553,4 +556,103 @@ func TestRemoveManagedByLabelFromNamespaces(t *testing.T) {
 		_, ok := n.Labels[common.ArgoCDManagedByLabel]
 		assert.Equal(t, ok, false)
 	}
+}
+
+func TestSetManagedNamespaces(t *testing.T) {
+	a := makeTestArgoCD()
+	nsList := &v1.NamespaceList{
+		Items: []v1.Namespace{
+			{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "test-namespace-1",
+					Labels: map[string]string{
+						common.ArgoCDManagedByLabel: testNamespace,
+					},
+				},
+			},
+			{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "test-namespace-2",
+					Labels: map[string]string{
+						common.ArgoCDManagedByLabel: testNamespace,
+					},
+				},
+			},
+			{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "test-namespace-3",
+					Labels: map[string]string{
+						common.ArgoCDManagedByLabel: "random-namespace",
+					},
+				},
+			},
+			{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "test-namespace-4",
+				},
+			},
+		},
+	}
+	r := makeTestReconciler(t, nsList)
+
+	err := r.setManagedNamespaces(a)
+	assert.NoError(t, err)
+
+	assert.Equal(t, len(r.ManagedNamespaces.Items), 3)
+	for _, n := range r.ManagedNamespaces.Items {
+		if n.Labels[common.ArgoCDManagedByLabel] != testNamespace && n.Name != testNamespace {
+			t.Errorf("Expected namespace %s to be managed by Argo CD instance %s", n.Name, testNamespace)
+		}
+	}
+}
+
+func TestGenerateRandomString(t *testing.T) {
+
+	// verify the creation of unique strings
+	s1 := generateRandomString(20)
+	s2 := generateRandomString(20)
+	assert.NotEqual(t, s1, s2)
+
+	// verify length
+	a, _ := b64.URLEncoding.DecodeString(s1)
+	assert.Len(t, a, 20)
+
+	b, _ := b64.URLEncoding.DecodeString(s2)
+	assert.Len(t, b, 20)
+}
+
+func generateEncodedPEM(t *testing.T, host string) []byte {
+	key, err := argoutil.NewPrivateKey()
+	assert.NoError(t, err)
+
+	cert, err := argoutil.NewSelfSignedCACertificate("foo", key)
+	assert.NoError(t, err)
+
+	encoded := argoutil.EncodeCertificatePEM(cert)
+	return encoded
+}
+
+// TestReconcileArgoCD_reconcileDexOAuthClientSecret This test make sures that if dex is enabled a service account is created with token stored in a secret which is used for oauth
+func TestReconcileArgoCD_reconcileDexOAuthClientSecret(t *testing.T) {
+	logf.SetLogger(ZapLogger(true))
+	a := makeTestArgoCD(func(ac *argoprojv1alpha1.ArgoCD) {
+		ac.Spec.Dex = &v1alpha1.ArgoCDDexSpec{
+			OpenShiftOAuth: true,
+		}
+	})
+	r := makeTestReconciler(t, a)
+	assert.NoError(t, createNamespace(r, a.Namespace, ""))
+	_, err := r.reconcileServiceAccount(common.ArgoCDDefaultDexServiceAccountName, a)
+	assert.NoError(t, err)
+	_, err = r.getDexOAuthClientSecret(a)
+	assert.NoError(t, err)
+	sa := newServiceAccountWithName(common.ArgoCDDefaultDexServiceAccountName, a)
+	assert.NoError(t, argoutil.FetchObject(r.Client, a.Namespace, sa.Name, sa))
+	tokenExists := false
+	for _, saSecret := range sa.Secrets {
+		if strings.Contains(saSecret.Name, "dex-server-token") {
+			tokenExists = true
+		}
+	}
+	assert.True(t, tokenExists, "Dex is enabled but unable to create oauth client secret")
 }

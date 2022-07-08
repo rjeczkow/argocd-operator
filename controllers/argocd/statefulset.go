@@ -24,6 +24,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	argoprojv1a1 "github.com/argoproj-labs/argocd-operator/api/v1alpha1"
@@ -130,7 +131,7 @@ func (r *ReconcileArgoCD) reconcileRedisStatefulSet(cr *argoprojv1a1.ArgoCD) err
 
 	ss.Spec.Template.ObjectMeta = metav1.ObjectMeta{
 		Annotations: map[string]string{
-			"checksum/init-config": "552ee3bec8fe5d9d865e371f7b615c6d472253649eb65d53ed4ae874f782647c", // TODO: Should this be hard-coded?
+			"checksum/init-config": "7128bfbb51eafaffe3c33b1b463e15f0cf6514cec570f9d9c4f2396f28c724ac", // TODO: Should this be hard-coded?
 		},
 		Labels: map[string]string{
 			common.ArgoCDKeyName: nameWithSuffix("redis-ha", cr),
@@ -138,18 +139,7 @@ func (r *ReconcileArgoCD) reconcileRedisStatefulSet(cr *argoprojv1a1.ArgoCD) err
 	}
 
 	ss.Spec.Template.Spec.Affinity = &corev1.Affinity{
-		PodAffinity: &corev1.PodAffinity{
-			PreferredDuringSchedulingIgnoredDuringExecution: []corev1.WeightedPodAffinityTerm{{
-				PodAffinityTerm: corev1.PodAffinityTerm{
-					LabelSelector: &metav1.LabelSelector{
-						MatchLabels: map[string]string{
-							common.ArgoCDKeyName: nameWithSuffix("redis-ha", cr),
-						},
-					},
-					TopologyKey: common.ArgoCDKeyFailureDomainZone,
-				},
-				Weight: int32(100),
-			}},
+		PodAntiAffinity: &corev1.PodAntiAffinity{
 			RequiredDuringSchedulingIgnoredDuringExecution: []corev1.PodAffinityTerm{{
 				LabelSelector: &metav1.LabelSelector{
 					MatchLabels: map[string]string{
@@ -160,6 +150,9 @@ func (r *ReconcileArgoCD) reconcileRedisStatefulSet(cr *argoprojv1a1.ArgoCD) err
 			}},
 		},
 	}
+
+	f := false
+	ss.Spec.Template.Spec.AutomountServiceAccountToken = &f
 
 	ss.Spec.Template.Spec.Containers = []corev1.Container{
 		{
@@ -172,23 +165,64 @@ func (r *ReconcileArgoCD) reconcileRedisStatefulSet(cr *argoprojv1a1.ArgoCD) err
 			Image:           getRedisHAContainerImage(cr),
 			ImagePullPolicy: corev1.PullIfNotPresent,
 			LivenessProbe: &corev1.Probe{
-				Handler: corev1.Handler{
-					TCPSocket: &corev1.TCPSocketAction{
-						Port: intstr.FromInt(common.ArgoCDDefaultRedisPort),
+				ProbeHandler: corev1.ProbeHandler{
+					Exec: &corev1.ExecAction{
+						Command: []string{
+							"sh",
+							"-c",
+							"/health/redis_liveness.sh",
+						},
 					},
 				},
-				InitialDelaySeconds: int32(15),
+				FailureThreshold:    int32(5),
+				InitialDelaySeconds: int32(30),
+				PeriodSeconds:       int32(15),
+				SuccessThreshold:    int32(1),
+				TimeoutSeconds:      int32(15),
 			},
 			Name: "redis",
 			Ports: []corev1.ContainerPort{{
 				ContainerPort: common.ArgoCDDefaultRedisPort,
 				Name:          "redis",
 			}},
+			ReadinessProbe: &corev1.Probe{
+				ProbeHandler: corev1.ProbeHandler{
+					Exec: &corev1.ExecAction{
+						Command: []string{
+							"sh",
+							"-c",
+							"/health/redis_readiness.sh",
+						},
+					},
+				},
+				FailureThreshold:    int32(5),
+				InitialDelaySeconds: int32(30),
+				PeriodSeconds:       int32(15),
+				SuccessThreshold:    int32(1),
+				TimeoutSeconds:      int32(15),
+			},
 			Resources: getRedisResources(cr),
+			SecurityContext: &corev1.SecurityContext{
+				AllowPrivilegeEscalation: boolPtr(false),
+				Capabilities: &corev1.Capabilities{
+					Drop: []corev1.Capability{
+						"ALL",
+					},
+				},
+				RunAsNonRoot: boolPtr(true),
+			},
 			VolumeMounts: []corev1.VolumeMount{
 				{
 					MountPath: "/data",
 					Name:      "data",
+				},
+				{
+					MountPath: "/health",
+					Name:      "health",
+				},
+				{
+					Name:      common.ArgoCDRedisServerTLSSecretName,
+					MountPath: "/app/config/redis/tls",
 				},
 			},
 		},
@@ -202,23 +236,64 @@ func (r *ReconcileArgoCD) reconcileRedisStatefulSet(cr *argoprojv1a1.ArgoCD) err
 			Image:           getRedisHAContainerImage(cr),
 			ImagePullPolicy: corev1.PullIfNotPresent,
 			LivenessProbe: &corev1.Probe{
-				Handler: corev1.Handler{
-					TCPSocket: &corev1.TCPSocketAction{
-						Port: intstr.FromInt(common.ArgoCDDefaultRedisSentinelPort),
+				ProbeHandler: corev1.ProbeHandler{
+					Exec: &corev1.ExecAction{
+						Command: []string{
+							"sh",
+							"-c",
+							"/health/sentinel_liveness.sh",
+						},
 					},
 				},
-				InitialDelaySeconds: int32(15),
+				FailureThreshold:    int32(5),
+				InitialDelaySeconds: int32(30),
+				PeriodSeconds:       int32(15),
+				SuccessThreshold:    int32(1),
+				TimeoutSeconds:      int32(15),
 			},
 			Name: "sentinel",
 			Ports: []corev1.ContainerPort{{
 				ContainerPort: common.ArgoCDDefaultRedisSentinelPort,
 				Name:          "sentinel",
 			}},
+			ReadinessProbe: &corev1.Probe{
+				ProbeHandler: corev1.ProbeHandler{
+					Exec: &corev1.ExecAction{
+						Command: []string{
+							"sh",
+							"-c",
+							"/health/sentinel_liveness.sh",
+						},
+					},
+				},
+				FailureThreshold:    int32(5),
+				InitialDelaySeconds: int32(30),
+				PeriodSeconds:       int32(15),
+				SuccessThreshold:    int32(1),
+				TimeoutSeconds:      int32(15),
+			},
 			Resources: getRedisResources(cr),
+			SecurityContext: &corev1.SecurityContext{
+				AllowPrivilegeEscalation: boolPtr(false),
+				Capabilities: &corev1.Capabilities{
+					Drop: []corev1.Capability{
+						"ALL",
+					},
+				},
+				RunAsNonRoot: boolPtr(true),
+			},
 			VolumeMounts: []corev1.VolumeMount{
 				{
 					MountPath: "/data",
 					Name:      "data",
+				},
+				{
+					MountPath: "/health",
+					Name:      "health",
+				},
+				{
+					Name:      common.ArgoCDRedisServerTLSSecretName,
+					MountPath: "/app/config/redis/tls",
 				},
 			},
 		},
@@ -234,21 +309,30 @@ func (r *ReconcileArgoCD) reconcileRedisStatefulSet(cr *argoprojv1a1.ArgoCD) err
 		Env: []corev1.EnvVar{
 			{
 				Name:  "SENTINEL_ID_0",
-				Value: "25b71bd9d0e4a51945d8422cab53f27027397c12", // TODO: Should this be hard-coded?
+				Value: "3c0d9c0320bb34888c2df5757c718ce6ca992ce6", // TODO: Should this be hard-coded?
 			},
 			{
 				Name:  "SENTINEL_ID_1",
-				Value: "896627000a81c7bdad8dbdcffd39728c9c17b309", // TODO: Should this be hard-coded?
+				Value: "40000915ab58c3fa8fd888fb8b24711944e6cbb4", // TODO: Should this be hard-coded?
 			},
 			{
 				Name:  "SENTINEL_ID_2",
-				Value: "3acbca861108bc47379b71b1d87d1c137dce591f", // TODO: Should this be hard-coded?
+				Value: "2bbec7894d954a8af3bb54d13eaec53cb024e2ca", // TODO: Should this be hard-coded?
 			},
 		},
 		Image:           getRedisHAContainerImage(cr),
 		ImagePullPolicy: corev1.PullIfNotPresent,
 		Name:            "config-init",
 		Resources:       getRedisResources(cr),
+		SecurityContext: &corev1.SecurityContext{
+			AllowPrivilegeEscalation: boolPtr(false),
+			Capabilities: &corev1.Capabilities{
+				Drop: []corev1.Capability{
+					"ALL",
+				},
+			},
+			RunAsNonRoot: boolPtr(true),
+		},
 		VolumeMounts: []corev1.VolumeMount{
 			{
 				MountPath: "/readonly-config",
@@ -258,6 +342,10 @@ func (r *ReconcileArgoCD) reconcileRedisStatefulSet(cr *argoprojv1a1.ArgoCD) err
 			{
 				MountPath: "/data",
 				Name:      "data",
+			},
+			{
+				Name:      common.ArgoCDRedisServerTLSSecretName,
+				MountPath: "/app/config/redis/tls",
 			},
 		},
 	}}
@@ -271,9 +359,14 @@ func (r *ReconcileArgoCD) reconcileRedisStatefulSet(cr *argoprojv1a1.ArgoCD) err
 		RunAsNonRoot: &runAsNonRoot,
 		RunAsUser:    &runAsUser,
 	}
+	AddSeccompProfileForOpenShift(r.Client, &ss.Spec.Template.Spec)
 
 	ss.Spec.Template.Spec.ServiceAccountName = nameWithSuffix("argocd-redis-ha", cr)
 
+	var terminationGracePeriodSeconds int64 = 60
+	ss.Spec.Template.Spec.TerminationGracePeriodSeconds = &terminationGracePeriodSeconds
+
+	var defaultMode int32 = 493
 	ss.Spec.Template.Spec.Volumes = []corev1.Volume{
 		{
 			Name: "config",
@@ -284,10 +377,31 @@ func (r *ReconcileArgoCD) reconcileRedisStatefulSet(cr *argoprojv1a1.ArgoCD) err
 					},
 				},
 			},
-		}, {
+		},
+		{
+			Name: "health",
+			VolumeSource: corev1.VolumeSource{
+				ConfigMap: &corev1.ConfigMapVolumeSource{
+					DefaultMode: &defaultMode,
+					LocalObjectReference: corev1.LocalObjectReference{
+						Name: common.ArgoCDRedisHAHealthConfigMapName,
+					},
+				},
+			},
+		},
+		{
 			Name: "data",
 			VolumeSource: corev1.VolumeSource{
 				EmptyDir: &corev1.EmptyDirVolumeSource{},
+			},
+		},
+		{
+			Name: common.ArgoCDRedisServerTLSSecretName,
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName: common.ArgoCDRedisServerTLSSecretName,
+					Optional:   boolPtr(true),
+				},
 			},
 		},
 	}
@@ -319,7 +433,7 @@ func getArgoControllerContainerEnv(cr *argoprojv1a1.ArgoCD) []corev1.EnvVar {
 	return env
 }
 
-func (r *ReconcileArgoCD) reconcileApplicationControllerStatefulSet(cr *argoprojv1a1.ArgoCD) error {
+func (r *ReconcileArgoCD) reconcileApplicationControllerStatefulSet(cr *argoprojv1a1.ArgoCD, useTLSForRedis bool) error {
 	var replicas int32 = common.ArgocdApplicationControllerDefaultReplicas
 
 	if cr.Spec.Controller.Sharding.Replicas != 0 && cr.Spec.Controller.Sharding.Enabled {
@@ -335,12 +449,12 @@ func (r *ReconcileArgoCD) reconcileApplicationControllerStatefulSet(cr *argoproj
 	controllerEnv = argoutil.EnvMerge(controllerEnv, proxyEnvVars(), false)
 	podSpec := &ss.Spec.Template.Spec
 	podSpec.Containers = []corev1.Container{{
-		Command:         getArgoApplicationControllerCommand(cr),
+		Command:         getArgoApplicationControllerCommand(cr, useTLSForRedis),
 		Image:           getArgoContainerImage(cr),
 		ImagePullPolicy: corev1.PullAlways,
 		Name:            "argocd-application-controller",
 		LivenessProbe: &corev1.Probe{
-			Handler: corev1.Handler{
+			ProbeHandler: corev1.ProbeHandler{
 				HTTPGet: &corev1.HTTPGetAction{
 					Path: "/healthz",
 					Port: intstr.FromInt(8082),
@@ -356,7 +470,7 @@ func (r *ReconcileArgoCD) reconcileApplicationControllerStatefulSet(cr *argoproj
 			},
 		},
 		ReadinessProbe: &corev1.Probe{
-			Handler: corev1.Handler{
+			ProbeHandler: corev1.ProbeHandler{
 				HTTPGet: &corev1.HTTPGetAction{
 					Path: "/healthz",
 					Port: intstr.FromInt(8082),
@@ -366,13 +480,27 @@ func (r *ReconcileArgoCD) reconcileApplicationControllerStatefulSet(cr *argoproj
 			PeriodSeconds:       10,
 		},
 		Resources: getArgoApplicationControllerResources(cr),
+		SecurityContext: &corev1.SecurityContext{
+			AllowPrivilegeEscalation: boolPtr(false),
+			Capabilities: &corev1.Capabilities{
+				Drop: []corev1.Capability{
+					"ALL",
+				},
+			},
+			RunAsNonRoot: boolPtr(true),
+		},
 		VolumeMounts: []corev1.VolumeMount{
 			{
 				Name:      "argocd-repo-server-tls",
 				MountPath: "/app/config/controller/tls",
 			},
+			{
+				Name:      common.ArgoCDRedisServerTLSSecretName,
+				MountPath: "/app/config/controller/tls/redis",
+			},
 		},
 	}}
+	AddSeccompProfileForOpenShift(r.Client, podSpec)
 	podSpec.ServiceAccountName = nameWithSuffix("argocd-application-controller", cr)
 	podSpec.Volumes = []corev1.Volume{
 		{
@@ -380,6 +508,15 @@ func (r *ReconcileArgoCD) reconcileApplicationControllerStatefulSet(cr *argoproj
 			VolumeSource: corev1.VolumeSource{
 				Secret: &corev1.SecretVolumeSource{
 					SecretName: common.ArgoCDRepoServerTLSSecretName,
+					Optional:   boolPtr(true),
+				},
+			},
+		},
+		{
+			Name: common.ArgoCDRedisServerTLSSecretName,
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName: common.ArgoCDRedisServerTLSSecretName,
 					Optional:   boolPtr(true),
 				},
 			},
@@ -425,10 +562,26 @@ func (r *ReconcileArgoCD) reconcileApplicationControllerStatefulSet(cr *argoproj
 			Image:           getArgoImportContainerImage(export),
 			ImagePullPolicy: corev1.PullAlways,
 			Name:            "argocd-import",
-			VolumeMounts:    getArgoImportVolumeMounts(export),
+			SecurityContext: &corev1.SecurityContext{
+				AllowPrivilegeEscalation: boolPtr(false),
+				Capabilities: &corev1.Capabilities{
+					Drop: []corev1.Capability{
+						"ALL",
+					},
+				},
+				RunAsNonRoot: boolPtr(true),
+			},
+			VolumeMounts: getArgoImportVolumeMounts(),
 		}}
 
 		podSpec.Volumes = getArgoImportVolumes(export)
+	}
+
+	invalidImagePod := containsInvalidImage(cr, r)
+	if invalidImagePod {
+		if err := r.Client.Delete(context.TODO(), ss); err != nil {
+			return err
+		}
 	}
 
 	existing := newStatefulSetWithSuffix("application-controller", "application-controller", cr)
@@ -441,7 +594,7 @@ func (r *ReconcileArgoCD) reconcileApplicationControllerStatefulSet(cr *argoproj
 			existing.Spec.Template.ObjectMeta.Labels["image.upgraded"] = time.Now().UTC().Format("01022006-150406-MST")
 			changed = true
 		}
-		desiredCommand := getArgoApplicationControllerCommand(cr)
+		desiredCommand := getArgoApplicationControllerCommand(cr, useTLSForRedis)
 		if isRepoServerTLSVerificationRequested(cr) {
 			desiredCommand = append(desiredCommand, "--repo-server-strict-tls")
 		}
@@ -495,8 +648,8 @@ func (r *ReconcileArgoCD) reconcileApplicationControllerStatefulSet(cr *argoproj
 }
 
 // reconcileStatefulSets will ensure that all StatefulSets are present for the given ArgoCD.
-func (r *ReconcileArgoCD) reconcileStatefulSets(cr *argoprojv1a1.ArgoCD) error {
-	if err := r.reconcileApplicationControllerStatefulSet(cr); err != nil {
+func (r *ReconcileArgoCD) reconcileStatefulSets(cr *argoprojv1a1.ArgoCD, useTLSForRedis bool) error {
+	if err := r.reconcileApplicationControllerStatefulSet(cr, useTLSForRedis); err != nil {
 		return err
 	}
 	if err := r.reconcileRedisStatefulSet(cr); err != nil {
@@ -526,4 +679,26 @@ func updateNodePlacementStateful(existing *appsv1.StatefulSet, ss *appsv1.Statef
 		existing.Spec.Template.Spec.Tolerations = ss.Spec.Template.Spec.Tolerations
 		*changed = true
 	}
+}
+
+// Returns true if a StatefulSet has pods in ErrImagePull or ImagePullBackoff state.
+// These pods cannot be restarted automatially due to known kubernetes issue https://github.com/kubernetes/kubernetes/issues/67250
+func containsInvalidImage(cr *argoprojv1a1.ArgoCD, r *ReconcileArgoCD) bool {
+
+	brokenPod := false
+
+	podList := &corev1.PodList{}
+	listOption := client.MatchingLabels{common.ArgoCDKeyName: fmt.Sprintf("%s-%s", cr.Name, "application-controller")}
+
+	if err := r.Client.List(context.TODO(), podList, listOption); err != nil {
+		log.Error(err, "Failed to list Pods")
+	}
+	if len(podList.Items) > 0 {
+		if len(podList.Items[0].Status.ContainerStatuses) > 0 {
+			if podList.Items[0].Status.ContainerStatuses[0].State.Waiting != nil && (podList.Items[0].Status.ContainerStatuses[0].State.Waiting.Reason == "ImagePullBackOff" || podList.Items[0].Status.ContainerStatuses[0].State.Waiting.Reason == "ErrImagePull") {
+				brokenPod = true
+			}
+		}
+	}
+	return brokenPod
 }

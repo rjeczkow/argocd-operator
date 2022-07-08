@@ -26,7 +26,7 @@ import (
 	"strings"
 	"time"
 
-	argopass "github.com/argoproj/argo-cd/util/password"
+	argopass "github.com/argoproj/argo-cd/v2/util/password"
 	tlsutil "github.com/operator-framework/operator-sdk/pkg/tls"
 
 	argoprojv1a1 "github.com/argoproj-labs/argocd-operator/api/v1alpha1"
@@ -73,11 +73,6 @@ func nowBytes() []byte {
 	return []byte(time.Now().UTC().Format(time.RFC3339))
 }
 
-// nowDefault is a shortcut function to return the current date/time in the default format.
-func nowDefault() string {
-	return time.Now().UTC().Format("01022006-150406-MST")
-}
-
 // nowNano returns a string with the current UTC time as epoch in nanoseconds
 func nowNano() string {
 	return fmt.Sprintf("%d", time.Now().UTC().UnixNano())
@@ -92,7 +87,7 @@ func newCASecret(cr *argoprojv1a1.ArgoCD) (*corev1.Secret, error) {
 		return nil, err
 	}
 
-	cert, err := argoutil.NewSelfSignedCACertificate(key)
+	cert, err := argoutil.NewSelfSignedCACertificate(cr.Name, key)
 	if err != nil {
 		return nil, err
 	}
@@ -166,7 +161,7 @@ func (r *ReconcileArgoCD) reconcileArgoSecret(cr *argoprojv1a1.ArgoCD) error {
 	}
 
 	if argoutil.IsObjectFound(r.Client, cr.Namespace, secret.Name, secret) {
-		return r.reconcileExistingArgoSecret(cr, secret, clusterSecret, tlsSecret)
+		return r.reconcileExistingArgoSecret(secret, clusterSecret, tlsSecret)
 	}
 
 	// Secret not found, create it...
@@ -295,7 +290,7 @@ func (r *ReconcileArgoCD) reconcileClusterSecrets(cr *argoprojv1a1.ArgoCD) error
 }
 
 // reconcileExistingArgoSecret will ensure that the Argo CD Secret is up to date.
-func (r *ReconcileArgoCD) reconcileExistingArgoSecret(cr *argoprojv1a1.ArgoCD, secret *corev1.Secret, clusterSecret *corev1.Secret, tlsSecret *corev1.Secret) error {
+func (r *ReconcileArgoCD) reconcileExistingArgoSecret(secret *corev1.Secret, clusterSecret *corev1.Secret, tlsSecret *corev1.Secret) error {
 	changed := false
 
 	if hasArgoAdminPasswordChanged(secret, clusterSecret) {
@@ -304,6 +299,10 @@ func (r *ReconcileArgoCD) reconcileExistingArgoSecret(cr *argoprojv1a1.ArgoCD, s
 			hashedPassword, err := argopass.HashPassword(strings.TrimRight(string(pwBytes), "\n"))
 			if err != nil {
 				return err
+			}
+
+			if secret.Data == nil {
+				secret.Data = make(map[string][]byte)
 			}
 
 			secret.Data[common.ArgoCDKeyAdminPassword] = []byte(hashedPassword)
@@ -443,12 +442,12 @@ func (r *ReconcileArgoCD) reconcileClusterPermissionsSecret(cr *argoprojv1a1.Arg
 	}
 	for _, s := range clusterSecrets.Items {
 		// check if cluster secret with default server address exists
-		// update the list of namespaces if value differs.
 		if string(s.Data["server"]) == common.ArgoCDDefaultServer {
+			// if the cluster belongs to cluster config namespace,
+			// remove all namespaces from cluster secret,
+			// else update the list of namespaces if value differs.
 			if clusterConfigInstance {
-				if err := r.Client.Delete(context.TODO(), &s); err != nil {
-					return err
-				}
+				delete(s.Data, "namespaces")
 			} else {
 				ns := strings.Split(string(s.Data["namespaces"]), ",")
 				for _, n := range namespaces {
@@ -458,8 +457,8 @@ func (r *ReconcileArgoCD) reconcileClusterPermissionsSecret(cr *argoprojv1a1.Arg
 				}
 				sort.Strings(ns)
 				s.Data["namespaces"] = []byte(strings.Join(ns, ","))
-				return r.Client.Update(context.TODO(), &s)
 			}
+			return r.Client.Update(context.TODO(), &s)
 		}
 	}
 
@@ -534,6 +533,108 @@ func (r *ReconcileArgoCD) reconcileRepoServerTLSSecret(cr *argoprojv1a1.ArgoCD) 
 		// Trigger rollout of application controller
 		controllerSts := newStatefulSetWithSuffix("application-controller", "application-controller", cr)
 		err = r.triggerRollout(controllerSts, "repo.tls.cert.changed")
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// reconcileRedisTLSSecret checks whether the argocd-operator-redis-tls secret
+// has changed since our last reconciliation loop. It does so by comparing the
+// checksum of tls.crt and tls.key in the status of the ArgoCD CR against the
+// values calculated from the live state in the cluster.
+func (r *ReconcileArgoCD) reconcileRedisTLSSecret(cr *argoprojv1a1.ArgoCD, useTLSForRedis bool) error {
+	var tlsSecretObj corev1.Secret
+	var sha256sum string
+
+	log.Info("reconciling redis-server TLS secret")
+
+	tlsSecretName := types.NamespacedName{Namespace: cr.Namespace, Name: common.ArgoCDRedisServerTLSSecretName}
+	err := r.Client.Get(context.TODO(), tlsSecretName, &tlsSecretObj)
+	if err != nil {
+		if !apierrors.IsNotFound(err) {
+			return err
+		}
+	} else if tlsSecretObj.Type != corev1.SecretTypeTLS {
+		// We only process secrets of type kubernetes.io/tls
+		return nil
+	} else {
+		// We do the checksum over a concatenated byte stream of cert + key
+		crt, crtOk := tlsSecretObj.Data[corev1.TLSCertKey]
+		key, keyOk := tlsSecretObj.Data[corev1.TLSPrivateKeyKey]
+		if crtOk && keyOk {
+			var sumBytes []byte
+			sumBytes = append(sumBytes, crt...)
+			sumBytes = append(sumBytes, key...)
+			sha256sum = fmt.Sprintf("%x", sha256.Sum256(sumBytes))
+		}
+	}
+
+	// The content of the TLS secret has changed since we last looked if the
+	// calculated checksum doesn't match the one stored in the status.
+	if cr.Status.RedisTLSChecksum != sha256sum {
+		// We store the value early to prevent a possible restart loop, for the
+		// cost of a possibly missed restart when we cannot update the status
+		// field of the resource.
+		cr.Status.RedisTLSChecksum = sha256sum
+		err = r.Client.Status().Update(context.TODO(), cr)
+		if err != nil {
+			return err
+		}
+
+		// Trigger rollout of redis
+		if cr.Spec.HA.Enabled {
+			err = r.recreateRedisHAConfigMap(cr, useTLSForRedis)
+			if err != nil {
+				return err
+			}
+			err = r.recreateRedisHAHealthConfigMap(cr, useTLSForRedis)
+			if err != nil {
+				return err
+			}
+			haProxyDepl := newDeploymentWithSuffix("redis-ha-haproxy", "redis", cr)
+			err = r.triggerRollout(haProxyDepl, "redis.tls.cert.changed")
+			if err != nil {
+				return err
+			}
+			// If we use triggerRollout on the redis stateful set, kubernetes will attempt to restart the  pods
+			// one at a time, and the first one to restart (which will be using tls) will hang as it tries to
+			// communicate with the existing pods (which are not using tls) to establish which is the master.
+			// So instead we delete the stateful set, which will delete all the pods.
+			redisSts := newStatefulSetWithSuffix("redis-ha-server", "redis", cr)
+			if argoutil.IsObjectFound(r.Client, redisSts.Namespace, redisSts.Name, redisSts) {
+				err = r.Client.Delete(context.TODO(), redisSts)
+				if err != nil {
+					return err
+				}
+			}
+		} else {
+			redisDepl := newDeploymentWithSuffix("redis", "redis", cr)
+			err = r.triggerRollout(redisDepl, "redis.tls.cert.changed")
+			if err != nil {
+				return err
+			}
+		}
+
+		// Trigger rollout of API server
+		apiDepl := newDeploymentWithSuffix("server", "server", cr)
+		err = r.triggerRollout(apiDepl, "redis.tls.cert.changed")
+		if err != nil {
+			return err
+		}
+
+		// Trigger rollout of repository server
+		repoDepl := newDeploymentWithSuffix("repo-server", "repo-server", cr)
+		err = r.triggerRollout(repoDepl, "redis.tls.cert.changed")
+		if err != nil {
+			return err
+		}
+
+		// Trigger rollout of application controller
+		controllerSts := newStatefulSetWithSuffix("application-controller", "application-controller", cr)
+		err = r.triggerRollout(controllerSts, "redis.tls.cert.changed")
 		if err != nil {
 			return err
 		}

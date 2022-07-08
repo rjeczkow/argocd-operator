@@ -79,12 +79,10 @@ make test
 
 Run the e2e tests.
 
-``` bash
-# In a separate terminal, run the operator locally
-ARGOCD_CLUSTER_CONFIG_NAMESPACES=argocd-e2e-cluster-config make install run
+Refer E2E test [guide](../e2e-test-guide.md) for the setup and execution.
 
-# In a separate terminal, run the tests
-hack/test.sh
+```bash
+k3d cluster create --servers 3
 ```
 
 #### Building the operator images to test on a cluster

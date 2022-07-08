@@ -4,11 +4,12 @@ import (
 	"errors"
 	"testing"
 
-	"gotest.tools/assert"
+	"github.com/stretchr/testify/assert"
 	appsv1 "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/rbac/v1"
 
 	argoprojv1alpha1 "github.com/argoproj-labs/argocd-operator/api/v1alpha1"
+	"github.com/argoproj-labs/argocd-operator/common"
 )
 
 var errMsg = errors.New("this is a test error")
@@ -33,7 +34,7 @@ func testClusterRoleHook(cr *argoprojv1alpha1.ArgoCD, v interface{}, s string) e
 func testRoleHook(cr *argoprojv1alpha1.ArgoCD, v interface{}, s string) error {
 	switch o := v.(type) {
 	case *v1.Role:
-		if o.Name == cr.Name+"-"+applicationController {
+		if o.Name == cr.Name+"-"+common.ArgoCDApplicationControllerComponent {
 			o.Rules = append(o.Rules, testRules()...)
 		}
 	}
@@ -52,9 +53,9 @@ func TestReconcileArgoCD_testDeploymentHook(t *testing.T) {
 
 	testDeployment := makeTestDeployment()
 
-	assert.NilError(t, applyReconcilerHook(a, testDeployment, ""))
+	assert.NoError(t, applyReconcilerHook(a, testDeployment, ""))
 	var expectedReplicas int32 = 3
-	assert.DeepEqual(t, &expectedReplicas, testDeployment.Spec.Replicas)
+	assert.Equal(t, &expectedReplicas, testDeployment.Spec.Replicas)
 }
 
 func TestReconcileArgoCD_testMultipleHooks(t *testing.T) {
@@ -67,16 +68,16 @@ func TestReconcileArgoCD_testMultipleHooks(t *testing.T) {
 	Register(testDeploymentHook)
 	Register(testClusterRoleHook)
 
-	assert.NilError(t, applyReconcilerHook(a, testDeployment, ""))
-	assert.NilError(t, applyReconcilerHook(a, testClusterRole, ""))
+	assert.NoError(t, applyReconcilerHook(a, testDeployment, ""))
+	assert.NoError(t, applyReconcilerHook(a, testClusterRole, ""))
 
 	// Verify if testDeploymentHook is executed successfully
 	var expectedReplicas int32 = 3
-	assert.DeepEqual(t, &expectedReplicas, testDeployment.Spec.Replicas)
+	assert.Equal(t, &expectedReplicas, testDeployment.Spec.Replicas)
 
 	// Verify if testClusterRoleHook is executed successfully
 	want := append(makeTestPolicyRules(), policyRuleForApplicationController()...)
-	assert.DeepEqual(t, want, testClusterRole.Rules)
+	assert.Equal(t, want, testClusterRole.Rules)
 }
 
 func TestReconcileArgoCD_hooks_end_upon_error(t *testing.T) {
@@ -87,7 +88,7 @@ func TestReconcileArgoCD_hooks_end_upon_error(t *testing.T) {
 	testClusterRole := makeTestClusterRole()
 
 	assert.Error(t, applyReconcilerHook(a, testClusterRole, ""), "this is a test error")
-	assert.DeepEqual(t, makeTestPolicyRules(), testClusterRole.Rules)
+	assert.Equal(t, makeTestPolicyRules(), testClusterRole.Rules)
 }
 
 func resetHooks() func() {

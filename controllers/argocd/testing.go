@@ -23,7 +23,7 @@ import (
 
 	"github.com/argoproj-labs/argocd-operator/common"
 
-	"gotest.tools/assert"
+	"github.com/stretchr/testify/assert"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	v1 "k8s.io/api/rbac/v1"
@@ -51,9 +51,9 @@ func ZapLogger(development bool) logr.Logger {
 
 func makeTestReconciler(t *testing.T, objs ...runtime.Object) *ReconcileArgoCD {
 	s := scheme.Scheme
-	assert.NilError(t, argoprojv1alpha1.AddToScheme(s))
+	assert.NoError(t, argoprojv1alpha1.AddToScheme(s))
 
-	cl := fake.NewFakeClientWithScheme(s, objs...)
+	cl := fake.NewClientBuilder().WithScheme(s).WithRuntimeObjects(objs...).Build()
 	return &ReconcileArgoCD{
 		Client: cl,
 		Scheme: s,
@@ -75,7 +75,7 @@ func makeTestArgoCD(opts ...argoCDOpt) *argoprojv1alpha1.ArgoCD {
 	return a
 }
 
-func makeTestArgoCDForKeycloak(opts ...argoCDOpt) *argoprojv1alpha1.ArgoCD {
+func makeTestArgoCDForKeycloak() *argoprojv1alpha1.ArgoCD {
 	a := &argoprojv1alpha1.ArgoCD{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      testArgoCDName,
@@ -92,9 +92,6 @@ func makeTestArgoCDForKeycloak(opts ...argoCDOpt) *argoprojv1alpha1.ArgoCD {
 			},
 		},
 	}
-	for _, o := range opts {
-		o(a)
-	}
 	return a
 }
 func makeTestArgoCDForKeycloakWithDex(opts ...argoCDOpt) *argoprojv1alpha1.ArgoCD {
@@ -107,7 +104,7 @@ func makeTestArgoCDForKeycloakWithDex(opts ...argoCDOpt) *argoprojv1alpha1.ArgoC
 			SSO: &argoprojv1alpha1.ArgoCDSSOSpec{
 				Provider: "keycloak",
 			},
-			Dex: argoprojv1alpha1.ArgoCDDexSpec{
+			Dex: &argoprojv1alpha1.ArgoCDDexSpec{
 				OpenShiftOAuth: true,
 				Resources:      makeTestDexResources(),
 			},
@@ -137,7 +134,7 @@ func makeTestArgoCDWithResources(opts ...argoCDOpt) *argoprojv1alpha1.ArgoCD {
 			HA: argoprojv1alpha1.ArgoCDHASpec{
 				Resources: makeTestHAResources(),
 			},
-			Dex: argoprojv1alpha1.ArgoCDDexSpec{
+			Dex: &argoprojv1alpha1.ArgoCDDexSpec{
 				Resources: makeTestDexResources(),
 			},
 			Controller: argoprojv1alpha1.ArgoCDApplicationControllerSpec{
@@ -205,20 +202,13 @@ func makeTestPolicyRules() []v1.PolicyRule {
 	}
 }
 
-func assertNoError(t *testing.T, err error) {
-	t.Helper()
-	if err != nil {
-		t.Fatal(err)
-	}
-}
-
 func initialCerts(t *testing.T, host string) argoCDOpt {
 	t.Helper()
 	return func(a *argoprojv1alpha1.ArgoCD) {
 		key, err := argoutil.NewPrivateKey()
-		assert.NilError(t, err)
-		cert, err := argoutil.NewSelfSignedCACertificate(key)
-		assert.NilError(t, err)
+		assert.NoError(t, err)
+		cert, err := argoutil.NewSelfSignedCACertificate(a.Name, key)
+		assert.NoError(t, err)
 		encoded := argoutil.EncodeCertificatePEM(cert)
 
 		a.Spec.TLS.InitialCerts = map[string]string{
@@ -294,5 +284,23 @@ func createNamespace(r *ReconcileArgoCD, n string, managedBy string) error {
 		ns.Labels = map[string]string{common.ArgoCDManagedByLabel: managedBy}
 	}
 
+	if r.ManagedNamespaces == nil {
+		r.ManagedNamespaces = &corev1.NamespaceList{}
+	}
+	r.ManagedNamespaces.Items = append(r.ManagedNamespaces.Items, *ns)
+
 	return r.Client.Create(context.TODO(), ns)
+}
+
+func merge(base map[string]string, diff map[string]string) map[string]string {
+	result := make(map[string]string)
+
+	for k, v := range base {
+		result[k] = v
+	}
+	for k, v := range diff {
+		result[k] = v
+	}
+
+	return result
 }

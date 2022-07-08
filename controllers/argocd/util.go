@@ -17,7 +17,8 @@ package argocd
 import (
 	"bytes"
 	"context"
-	"errors"
+	"crypto/rand"
+	"encoding/base64"
 	"fmt"
 	"os"
 	"reflect"
@@ -30,18 +31,23 @@ import (
 
 	"gopkg.in/yaml.v2"
 
+	argoproj "github.com/argoproj-labs/argocd-operator/api/v1alpha1"
 	argoprojv1a1 "github.com/argoproj-labs/argocd-operator/api/v1alpha1"
 	"github.com/argoproj-labs/argocd-operator/common"
 	"github.com/argoproj-labs/argocd-operator/controllers/argoutil"
 
 	monitoringv1 "github.com/coreos/prometheus-operator/pkg/apis/monitoring/v1"
 	oappsv1 "github.com/openshift/api/apps/v1"
+	configv1 "github.com/openshift/api/config/v1"
 	routev1 "github.com/openshift/api/route/v1"
+	configv1client "github.com/openshift/client-go/config/clientset/versioned/typed/config/v1"
 	"github.com/sethvargo/go-password/password"
+	"golang.org/x/mod/semver"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	v1 "k8s.io/api/rbac/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -56,12 +62,23 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/source"
 )
 
-// DexConnector represents an authentication connector for Dex.
-type DexConnector struct {
-	Config map[string]interface{} `yaml:"config,omitempty"`
-	ID     string                 `yaml:"id"`
-	Name   string                 `yaml:"name"`
-	Type   string                 `yaml:"type"`
+var (
+	versionAPIFound = false
+)
+
+// IsVersionAPIAvailable returns true if the version api is present
+func IsVersionAPIAvailable() bool {
+	return versionAPIFound
+}
+
+// verifyVersionAPI will verify that the template API is present.
+func verifyVersionAPI() error {
+	found, err := argoutil.VerifyAPI(configv1.GroupName, configv1.GroupVersion.Version)
+	if err != nil {
+		return err
+	}
+	versionAPIFound = found
+	return nil
 }
 
 // generateArgoAdminPassword will generate and return the admin password for Argo CD.
@@ -99,15 +116,26 @@ func getArgoApplicationControllerResources(cr *argoprojv1a1.ArgoCD) corev1.Resou
 }
 
 // getArgoApplicationControllerCommand will return the command for the ArgoCD Application Controller component.
-func getArgoApplicationControllerCommand(cr *argoprojv1a1.ArgoCD) []string {
+func getArgoApplicationControllerCommand(cr *argoprojv1a1.ArgoCD, useTLSForRedis bool) []string {
 	cmd := []string{
 		"argocd-application-controller",
 		"--operation-processors", fmt.Sprint(getArgoServerOperationProcessors(cr)),
 		"--redis", getRedisServerAddress(cr),
-		"--repo-server", getRepoServerAddress(cr),
-		"--status-processors", fmt.Sprint(getArgoServerStatusProcessors(cr)),
-		"--kubectl-parallelism-limit", fmt.Sprint(getArgoControllerParellismLimit(cr)),
 	}
+
+	if useTLSForRedis {
+		cmd = append(cmd, "--redis-use-tls")
+		if isRedisTLSVerificationDisabled(cr) {
+			cmd = append(cmd, "--redis-insecure-skip-tls-verify")
+		} else {
+			cmd = append(cmd, "--redis-ca-certificate", "/app/config/controller/tls/redis/tls.crt")
+		}
+	}
+
+	cmd = append(cmd, "--repo-server", getRepoServerAddress(cr))
+	cmd = append(cmd, "--status-processors", fmt.Sprint(getArgoServerStatusProcessors(cr)))
+	cmd = append(cmd, "--kubectl-parallelism-limit", fmt.Sprint(getArgoControllerParellismLimit(cr)))
+
 	if cr.Spec.Controller.AppSync != nil {
 		cmd = append(cmd, "--app-resync", strconv.FormatInt(int64(cr.Spec.Controller.AppSync.Seconds()), 10))
 	}
@@ -184,18 +212,6 @@ func getArgoRepoResources(cr *argoprojv1a1.ArgoCD) corev1.ResourceRequirements {
 	return resources
 }
 
-// getArgoRepoInitContainers will return the initContainers for the Argo CD Repo server container.
-func getArgoRepoInitContainers(cr *argoprojv1a1.ArgoCD) []corev1.Container {
-	initContainers := []corev1.Container{}
-
-	// Allow override of initContianers from CR
-	if cr.Spec.Repo.InitContainers != nil {
-		initContainers = cr.Spec.Repo.InitContainers
-	}
-
-	return initContainers
-}
-
 // getArgoServerInsecure returns the insecure value for the ArgoCD Server component.
 func getArgoServerInsecure(cr *argoprojv1a1.ArgoCD) bool {
 	return cr.Spec.Server.Insecure
@@ -203,6 +219,10 @@ func getArgoServerInsecure(cr *argoprojv1a1.ArgoCD) bool {
 
 func isRepoServerTLSVerificationRequested(cr *argoprojv1a1.ArgoCD) bool {
 	return cr.Spec.Repo.VerifyTLS
+}
+
+func isRedisTLSVerificationDisabled(cr *argoprojv1a1.ArgoCD) bool {
+	return cr.Spec.Redis.DisableTLSVerification
 }
 
 // getArgoServerGRPCHost will return the GRPC host for the given ArgoCD.
@@ -304,83 +324,6 @@ func getArgoControllerParellismLimit(cr *argoprojv1a1.ArgoCD) int32 {
 	return pl
 }
 
-// getDexContainerImage will return the container image for the Dex server.
-//
-// There are three possible options for configuring the image, and this is the
-// order of preference.
-//
-// 1. from the Spec, the spec.dex field has an image and version to use for
-// generating an image reference.
-// 2. from the Environment, this looks for the `ARGOCD_DEX_IMAGE` field and uses
-// that if the spec is not configured.
-// 3. the default is configured in common.ArgoCDDefaultDexVersion and
-// common.ArgoCDDefaultDexImage.
-func getDexContainerImage(cr *argoprojv1a1.ArgoCD) string {
-	defaultImg, defaultTag := false, false
-	img := cr.Spec.Dex.Image
-	if img == "" {
-		img = common.ArgoCDDefaultDexImage
-		defaultImg = true
-	}
-
-	tag := cr.Spec.Dex.Version
-	if tag == "" {
-		tag = common.ArgoCDDefaultDexVersion
-		defaultTag = true
-	}
-	if e := os.Getenv(common.ArgoCDDexImageEnvName); e != "" && (defaultTag && defaultImg) {
-		return e
-	}
-	return argoutil.CombineImageTag(img, tag)
-}
-
-// getDexOAuthClientID will return the OAuth client ID for the given ArgoCD.
-func getDexOAuthClientID(cr *argoprojv1a1.ArgoCD) string {
-	return fmt.Sprintf("system:serviceaccount:%s:%s", cr.Namespace, fmt.Sprintf("%s-%s", cr.Name, common.ArgoCDDefaultDexServiceAccountName))
-}
-
-// getDexOAuthClientSecret will return the OAuth client secret for the given ArgoCD.
-func (r *ReconcileArgoCD) getDexOAuthClientSecret(cr *argoprojv1a1.ArgoCD) (*string, error) {
-	sa := newServiceAccountWithName(common.ArgoCDDefaultDexServiceAccountName, cr)
-	if err := argoutil.FetchObject(r.Client, cr.Namespace, sa.Name, sa); err != nil {
-		return nil, err
-	}
-
-	// Find the token secret
-	var tokenSecret *corev1.ObjectReference
-	for _, saSecret := range sa.Secrets {
-		if strings.Contains(saSecret.Name, "token") {
-			tokenSecret = &saSecret
-			break
-		}
-	}
-
-	if tokenSecret == nil {
-		return nil, errors.New("unable to locate ServiceAccount token for OAuth client secret")
-	}
-
-	// Fetch the secret to obtain the token
-	secret := argoutil.NewSecretWithName(cr, tokenSecret.Name)
-	if err := argoutil.FetchObject(r.Client, cr.Namespace, secret.Name, secret); err != nil {
-		return nil, err
-	}
-
-	token := string(secret.Data["token"])
-	return &token, nil
-}
-
-// getDexResources will return the ResourceRequirements for the Dex container.
-func getDexResources(cr *argoprojv1a1.ArgoCD) corev1.ResourceRequirements {
-	resources := corev1.ResourceRequirements{}
-
-	// Allow override of resource requirements from CR
-	if cr.Spec.Dex.Resources != nil {
-		resources = *cr.Spec.Dex.Resources
-	}
-
-	return resources
-}
-
 // getGrafanaContainerImage will return the container image for the Grafana server.
 func getGrafanaContainerImage(cr *argoprojv1a1.ArgoCD) string {
 	defaultTag, defaultImg := false, false
@@ -413,37 +356,6 @@ func getGrafanaResources(cr *argoprojv1a1.ArgoCD) corev1.ResourceRequirements {
 	return resources
 }
 
-// getOpenShiftDexConfig will return the configuration for the Dex server running on OpenShift.
-func (r *ReconcileArgoCD) getOpenShiftDexConfig(cr *argoprojv1a1.ArgoCD) (string, error) {
-	clientSecret, err := r.getDexOAuthClientSecret(cr)
-	if err != nil {
-		return "", err
-	}
-
-	connector := DexConnector{
-		Type: "openshift",
-		ID:   "openshift",
-		Name: "OpenShift",
-		Config: map[string]interface{}{
-			"issuer":       "https://kubernetes.default.svc", // TODO: Should this be hard-coded?
-			"clientID":     getDexOAuthClientID(cr),
-			"clientSecret": *clientSecret,
-			"redirectURI":  r.getDexOAuthRedirectURI(cr),
-			"insecureCA":   true, // TODO: Configure for openshift CA,
-			"groups":       cr.Spec.Dex.Groups,
-		},
-	}
-
-	connectors := make([]DexConnector, 0)
-	connectors = append(connectors, connector)
-
-	dex := make(map[string]interface{})
-	dex["connectors"] = connectors
-
-	bytes, err := yaml.Marshal(dex)
-	return string(bytes), err
-}
-
 // getRedisConfigPath will return the path for the Redis configuration templates.
 func getRedisConfigPath() string {
 	path := os.Getenv("REDIS_CONFIG_PATH")
@@ -455,9 +367,12 @@ func getRedisConfigPath() string {
 
 // getRedisInitScript will load the redis configuration from a template on disk for the given ArgoCD.
 // If an error occurs, an empty string value will be returned.
-func getRedisConf(cr *argoprojv1a1.ArgoCD) string {
+func getRedisConf(useTLSForRedis bool) string {
 	path := fmt.Sprintf("%s/redis.conf.tpl", getRedisConfigPath())
-	conf, err := loadTemplateFile(path, map[string]string{})
+	params := map[string]string{
+		"UseTLS": strconv.FormatBool(useTLSForRedis),
+	}
+	conf, err := loadTemplateFile(path, params)
 	if err != nil {
 		log.Error(err, "unable to load redis configuration")
 		return ""
@@ -532,10 +447,11 @@ func getRedisHAProxyContainerImage(cr *argoprojv1a1.ArgoCD) string {
 
 // getRedisInitScript will load the redis init script from a template on disk for the given ArgoCD.
 // If an error occurs, an empty string value will be returned.
-func getRedisInitScript(cr *argoprojv1a1.ArgoCD) string {
+func getRedisInitScript(cr *argoprojv1a1.ArgoCD, useTLSForRedis bool) string {
 	path := fmt.Sprintf("%s/init.sh.tpl", getRedisConfigPath())
 	vars := map[string]string{
 		"ServiceName": nameWithSuffix("redis-ha", cr),
+		"UseTLS":      strconv.FormatBool(useTLSForRedis),
 	}
 
 	script, err := loadTemplateFile(path, vars)
@@ -548,10 +464,11 @@ func getRedisInitScript(cr *argoprojv1a1.ArgoCD) string {
 
 // getRedisHAProxySConfig will load the Redis HA Proxy configuration from a template on disk for the given ArgoCD.
 // If an error occurs, an empty string value will be returned.
-func getRedisHAProxyConfig(cr *argoprojv1a1.ArgoCD) string {
+func getRedisHAProxyConfig(cr *argoprojv1a1.ArgoCD, useTLSForRedis bool) string {
 	path := fmt.Sprintf("%s/haproxy.cfg.tpl", getRedisConfigPath())
 	vars := map[string]string{
 		"ServiceName": nameWithSuffix("redis-ha", cr),
+		"UseTLS":      strconv.FormatBool(useTLSForRedis),
 	}
 
 	script, err := loadTemplateFile(path, vars)
@@ -604,11 +521,59 @@ func getRedisHAProxyResources(cr *argoprojv1a1.ArgoCD) corev1.ResourceRequiremen
 
 // getRedisSentinelConf will load the redis sentinel configuration from a template on disk for the given ArgoCD.
 // If an error occurs, an empty string value will be returned.
-func getRedisSentinelConf(cr *argoprojv1a1.ArgoCD) string {
+func getRedisSentinelConf(useTLSForRedis bool) string {
 	path := fmt.Sprintf("%s/sentinel.conf.tpl", getRedisConfigPath())
-	conf, err := loadTemplateFile(path, map[string]string{})
+	params := map[string]string{
+		"UseTLS": strconv.FormatBool(useTLSForRedis),
+	}
+	conf, err := loadTemplateFile(path, params)
 	if err != nil {
 		log.Error(err, "unable to load redis sentinel configuration")
+		return ""
+	}
+	return conf
+}
+
+// getRedisLivenessScript will load the redis liveness script from a template on disk for the given ArgoCD.
+// If an error occurs, an empty string value will be returned.
+func getRedisLivenessScript(useTLSForRedis bool) string {
+	path := fmt.Sprintf("%s/redis_liveness.sh.tpl", getRedisConfigPath())
+	params := map[string]string{
+		"UseTLS": strconv.FormatBool(useTLSForRedis),
+	}
+	conf, err := loadTemplateFile(path, params)
+	if err != nil {
+		log.Error(err, "unable to load redis liveness script")
+		return ""
+	}
+	return conf
+}
+
+// getRedisReadinessScript will load the redis readiness script from a template on disk for the given ArgoCD.
+// If an error occurs, an empty string value will be returned.
+func getRedisReadinessScript(useTLSForRedis bool) string {
+	path := fmt.Sprintf("%s/redis_readiness.sh.tpl", getRedisConfigPath())
+	params := map[string]string{
+		"UseTLS": strconv.FormatBool(useTLSForRedis),
+	}
+	conf, err := loadTemplateFile(path, params)
+	if err != nil {
+		log.Error(err, "unable to load redis readiness script")
+		return ""
+	}
+	return conf
+}
+
+// getSentinelLivenessScript will load the redis liveness script from a template on disk for the given ArgoCD.
+// If an error occurs, an empty string value will be returned.
+func getSentinelLivenessScript(useTLSForRedis bool) string {
+	path := fmt.Sprintf("%s/sentinel_liveness.sh.tpl", getRedisConfigPath())
+	params := map[string]string{
+		"UseTLS": strconv.FormatBool(useTLSForRedis),
+	}
+	conf, err := loadTemplateFile(path, params)
+	if err != nil {
+		log.Error(err, "unable to load sentinel liveness script")
 		return ""
 	}
 	return conf
@@ -666,6 +631,10 @@ func InspectCluster() error {
 	if err := verifyTemplateAPI(); err != nil {
 		return err
 	}
+
+	if err := verifyVersionAPI(); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -683,15 +652,75 @@ func (r *ReconcileArgoCD) reconcileCertificateAuthority(cr *argoprojv1a1.ArgoCD)
 	return nil
 }
 
+func (r *ReconcileArgoCD) redisShouldUseTLS(cr *argoprojv1a1.ArgoCD) bool {
+	var tlsSecretObj corev1.Secret
+	tlsSecretName := types.NamespacedName{Namespace: cr.Namespace, Name: common.ArgoCDRedisServerTLSSecretName}
+	err := r.Client.Get(context.TODO(), tlsSecretName, &tlsSecretObj)
+	if err != nil {
+		if !apierrors.IsNotFound(err) {
+			log.Error(err, "error looking up redis tls secret")
+		}
+		return false
+	}
+
+	secretOwnerRefs := tlsSecretObj.GetOwnerReferences()
+	if len(secretOwnerRefs) > 0 {
+		// OpenShift service CA makes the owner reference for the TLS secret to the
+		// service, which in turn is owned by the controller. This method performs
+		// a lookup of the controller through the intermediate owning service.
+		for _, secretOwner := range secretOwnerRefs {
+			if isOwnerOfInterest(secretOwner) {
+				key := client.ObjectKey{Name: secretOwner.Name, Namespace: tlsSecretObj.GetNamespace()}
+				svc := &corev1.Service{}
+
+				// Get the owning object of the secret
+				err := r.Client.Get(context.TODO(), key, svc)
+				if err != nil {
+					log.Error(err, fmt.Sprintf("could not get owner of secret %s", tlsSecretObj.GetName()))
+					return false
+				}
+
+				// If there's an object of kind ArgoCD in the owner's list,
+				// this will be our reconciled object.
+				serviceOwnerRefs := svc.GetOwnerReferences()
+				for _, serviceOwner := range serviceOwnerRefs {
+					if serviceOwner.Kind == "ArgoCD" {
+						return true
+					}
+				}
+			}
+		}
+	} else {
+		// For secrets without owner (i.e. manually created), we apply some
+		// heuristics. This may not be as accurate (e.g. if the user made a
+		// typo in the resource's name), but should be good enough for now.
+		if _, ok := tlsSecretObj.Annotations[common.AnnotationName]; ok {
+			return true
+		}
+	}
+	return false
+}
+
 // reconcileResources will reconcile common ArgoCD resources.
 func (r *ReconcileArgoCD) reconcileResources(cr *argoprojv1a1.ArgoCD) error {
+
+	// reconcile SSO first, because dex resources get reconciled through other function calls as well, not just through reconcileSSO (this is important
+	// so that dex resources can be appropriately cleaned up when DISABLE_DEX is set to true and the operator pod restarts but doesn't enter
+	// dex reconciliation again because dex is disabled, thus leaving hanging resources around if they are not also cleaned up in the main loop)
+	// we reconcile SSO first so that we can catch and throw errors for any illegal SSO configurations right away, and return control from here
+	// preventing dex resources from getting created anyway through the other function calls, effectively bypassing the SSO checks
+	log.Info("reconciling SSO")
+	if err := r.reconcileSSO(cr); err != nil {
+		return err
+	}
+
 	log.Info("reconciling status")
 	if err := r.reconcileStatus(cr); err != nil {
 		return err
 	}
 
 	log.Info("reconciling roles")
-	if _, err := r.reconcileRoles(cr); err != nil {
+	if err := r.reconcileRoles(cr); err != nil {
 		return err
 	}
 
@@ -715,8 +744,10 @@ func (r *ReconcileArgoCD) reconcileResources(cr *argoprojv1a1.ArgoCD) error {
 		return err
 	}
 
+	useTLSForRedis := r.redisShouldUseTLS(cr)
+
 	log.Info("reconciling config maps")
-	if err := r.reconcileConfigMaps(cr); err != nil {
+	if err := r.reconcileConfigMaps(cr, useTLSForRedis); err != nil {
 		return err
 	}
 
@@ -726,12 +757,12 @@ func (r *ReconcileArgoCD) reconcileResources(cr *argoprojv1a1.ArgoCD) error {
 	}
 
 	log.Info("reconciling deployments")
-	if err := r.reconcileDeployments(cr); err != nil {
+	if err := r.reconcileDeployments(cr, useTLSForRedis); err != nil {
 		return err
 	}
 
 	log.Info("reconciling statefulsets")
-	if err := r.reconcileStatefulSets(cr); err != nil {
+	if err := r.reconcileStatefulSets(cr, useTLSForRedis); err != nil {
 		return err
 	}
 
@@ -778,15 +809,19 @@ func (r *ReconcileArgoCD) reconcileResources(cr *argoprojv1a1.ArgoCD) error {
 		}
 	}
 
+	if cr.Spec.Notifications.Enabled {
+		log.Info("reconciling Notifications controller")
+		if err := r.reconcileNotificationsController(cr); err != nil {
+			return err
+		}
+	}
+
 	if err := r.reconcileRepoServerTLSSecret(cr); err != nil {
 		return err
 	}
 
-	if cr.Spec.SSO != nil {
-		log.Info("reconciling SSO")
-		if err := r.reconcileSSO(cr); err != nil {
-			return err
-		}
+	if err := r.reconcileRedisTLSSecret(cr, useTLSForRedis); err != nil {
+		return err
 	}
 
 	return nil
@@ -891,7 +926,7 @@ func removeString(slice []string, s string) []string {
 }
 
 // setResourceWatches will register Watches for each of the supported Resources.
-func setResourceWatches(bldr *builder.Builder, clusterResourceMapper, tlsSecretMapper, namespaceResourceMapper handler.MapFunc) *builder.Builder {
+func (r *ReconcileArgoCD) setResourceWatches(bldr *builder.Builder, clusterResourceMapper, tlsSecretMapper, namespaceResourceMapper handler.MapFunc) *builder.Builder {
 
 	deploymentConfigPred := predicate.Funcs{
 		UpdateFunc: func(e event.UpdateEvent) bool {
@@ -935,10 +970,54 @@ func setResourceWatches(bldr *builder.Builder, clusterResourceMapper, tlsSecretM
 			if !ok {
 				return false
 			}
+
+			// Handle deletion of SSO from Argo CD custom resource
 			if !reflect.DeepEqual(oldCR.Spec.SSO, newCR.Spec.SSO) && newCR.Spec.SSO == nil {
-				err := deleteSSOConfiguration(newCR)
+				err := r.deleteSSOConfiguration(newCR, oldCR)
 				if err != nil {
 					log.Error(err, fmt.Sprintf("Failed to delete SSO Configuration for ArgoCD %s in namespace %s",
+						newCR.Name, newCR.Namespace))
+				}
+			}
+
+			// trigger deletion of dex when dex configuration is removed from .spec.dex
+			if !reflect.DeepEqual(oldCR.Spec.Dex, newCR.Spec.Dex) && (newCR.Spec.Dex == nil ||
+				(newCR.Spec.Dex.Config == "" && !newCR.Spec.Dex.OpenShiftOAuth)) {
+				err := r.deleteDexResources(newCR)
+				if err != nil {
+					log.Error(err, fmt.Sprintf("Failed to delete SSO Configuration for ArgoCD %s in namespace %s",
+						newCR.Name, newCR.Namespace))
+				}
+			}
+
+			// Trigger reconciliation of SSO on update event
+			if !reflect.DeepEqual(oldCR.Spec.SSO, newCR.Spec.SSO) && newCR.Spec.SSO != nil && oldCR.Spec.SSO != nil {
+				err := r.reconcileSSO(newCR)
+				if err != nil {
+					log.Error(err, fmt.Sprintf("Failed to update existing SSO Configuration for ArgoCD %s in namespace %s",
+						newCR.Name, newCR.Namespace))
+				}
+			}
+			return true
+		},
+	}
+
+	// Add new predicate to delete Notifications Resources. The predicate watches the Argo CD CR for changes to the `.spec.Notifications.Enabled`
+	// field. When a change is detected that results in notifications being disabled, we trigger deletion of notifications resources
+	deleteNotificationsPred := predicate.Funcs{
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			newCR, ok := e.ObjectNew.(*argoprojv1a1.ArgoCD)
+			if !ok {
+				return false
+			}
+			oldCR, ok := e.ObjectOld.(*argoprojv1a1.ArgoCD)
+			if !ok {
+				return false
+			}
+			if oldCR.Spec.Notifications.Enabled && !newCR.Spec.Notifications.Enabled {
+				err := r.deleteNotificationsResources(newCR)
+				if err != nil {
+					log.Error(err, fmt.Sprintf("Failed to delete notifications controller resources for ArgoCD %s in namespace %s",
 						newCR.Name, newCR.Namespace))
 				}
 			}
@@ -947,7 +1026,7 @@ func setResourceWatches(bldr *builder.Builder, clusterResourceMapper, tlsSecretM
 	}
 
 	// Watch for changes to primary resource ArgoCD
-	bldr.For(&argoprojv1a1.ArgoCD{}, builder.WithPredicates(deleteSSOPred))
+	bldr.For(&argoprojv1a1.ArgoCD{}, builder.WithPredicates(deleteSSOPred, deleteNotificationsPred))
 
 	// Watch for changes to ConfigMap sub-resources owned by ArgoCD instances.
 	bldr.Owns(&corev1.ConfigMap{})
@@ -1017,17 +1096,12 @@ func setResourceWatches(bldr *builder.Builder, clusterResourceMapper, tlsSecretM
 	return bldr
 }
 
-// withClusterLabels will add the given labels to the labels for the cluster and return the result.
-func withClusterLabels(cr *argoprojv1a1.ArgoCD, addLabels map[string]string) map[string]string {
-	labels := argoutil.LabelsForCluster(cr)
-	for key, val := range addLabels {
-		labels[key] = val
-	}
-	return labels
-}
-
 // boolPtr returns a pointer to val
 func boolPtr(val bool) *bool {
+	return &val
+}
+
+func int64Ptr(val int64) *int64 {
 	return &val
 }
 
@@ -1092,10 +1166,17 @@ func namespaceFilterPredicate() predicate.Predicate {
 					if err != nil {
 						return false
 					}
-					if err := deleteRBACsForNamespace(valOld, e.ObjectOld.GetName(), k8sClient); err != nil {
+					if err := deleteRBACsForNamespace(e.ObjectOld.GetName(), k8sClient); err != nil {
 						log.Error(err, fmt.Sprintf("failed to delete RBACs for namespace: %s", e.ObjectOld.GetName()))
 					} else {
 						log.Info(fmt.Sprintf("Successfully removed the RBACs for namespace: %s", e.ObjectOld.GetName()))
+					}
+
+					// Delete namespace from cluster secret of previously managing argocd instance
+					if err = deleteManagedNamespaceFromClusterSecret(valOld, e.ObjectOld.GetName(), k8sClient); err != nil {
+						log.Error(err, fmt.Sprintf("unable to delete namespace %s from cluster secret", e.ObjectOld.GetName()))
+					} else {
+						log.Info(fmt.Sprintf("Successfully deleted namespace %s from cluster secret", e.ObjectOld.GetName()))
 					}
 				}
 				return true
@@ -1107,10 +1188,35 @@ func namespaceFilterPredicate() predicate.Predicate {
 				if err != nil {
 					return false
 				}
-				if err := deleteRBACsForNamespace(ns, e.ObjectOld.GetName(), k8sClient); err != nil {
+				if err := deleteRBACsForNamespace(e.ObjectOld.GetName(), k8sClient); err != nil {
 					log.Error(err, fmt.Sprintf("failed to delete RBACs for namespace: %s", e.ObjectOld.GetName()))
 				} else {
 					log.Info(fmt.Sprintf("Successfully removed the RBACs for namespace: %s", e.ObjectOld.GetName()))
+				}
+
+				// Delete managed namespace from cluster secret
+				if err = deleteManagedNamespaceFromClusterSecret(ns, e.ObjectOld.GetName(), k8sClient); err != nil {
+					log.Error(err, fmt.Sprintf("unable to delete namespace %s from cluster secret", e.ObjectOld.GetName()))
+				} else {
+					log.Info(fmt.Sprintf("Successfully deleted namespace %s from cluster secret", e.ObjectOld.GetName()))
+				}
+
+			}
+			return false
+		},
+		DeleteFunc: func(e event.DeleteEvent) bool {
+			if ns, ok := e.Object.GetLabels()[common.ArgoCDManagedByLabel]; ok && ns != "" {
+				k8sClient, err := initK8sClient()
+
+				if err != nil {
+					return false
+				}
+				// Delete managed namespace from cluster secret
+				err = deleteManagedNamespaceFromClusterSecret(ns, e.Object.GetName(), k8sClient)
+				if err != nil {
+					log.Error(err, fmt.Sprintf("unable to delete namespace %s from cluster secret", e.Object.GetName()))
+				} else {
+					log.Info(fmt.Sprintf("Successfully deleted namespace %s from cluster secret", e.Object.GetName()))
 				}
 			}
 			return false
@@ -1119,7 +1225,7 @@ func namespaceFilterPredicate() predicate.Predicate {
 }
 
 // deleteRBACsForNamespace deletes the RBACs when the label from the namespace is removed.
-func deleteRBACsForNamespace(ownerNS, sourceNS string, k8sClient kubernetes.Interface) error {
+func deleteRBACsForNamespace(sourceNS string, k8sClient kubernetes.Interface) error {
 	log.Info(fmt.Sprintf("Removing the RBACs created for the namespace: %s", sourceNS))
 
 	// List all the roles created for ArgoCD using the label selector
@@ -1153,8 +1259,13 @@ func deleteRBACsForNamespace(ownerNS, sourceNS string, k8sClient kubernetes.Inte
 		}
 	}
 
+	return nil
+}
+
+func deleteManagedNamespaceFromClusterSecret(ownerNS, sourceNS string, k8sClient kubernetes.Interface) error {
+
 	// Get the cluster secret used for configuring ArgoCD
-	labelSelector = metav1.LabelSelector{MatchLabels: map[string]string{common.ArgoCDSecretTypeLabel: "cluster"}}
+	labelSelector := metav1.LabelSelector{MatchLabels: map[string]string{common.ArgoCDSecretTypeLabel: "cluster"}}
 	secrets, err := k8sClient.CoreV1().Secrets(ownerNS).List(context.TODO(), metav1.ListOptions{LabelSelector: labels.Set(labelSelector.MatchLabels).String()})
 	if err != nil {
 		log.Error(err, fmt.Sprintf("failed to retrieve secrets for namespace: %s", ownerNS))
@@ -1224,4 +1335,144 @@ func getLogFormat(logField string) string {
 		return logField
 	}
 	return common.ArgoCDDefaultLogFormat
+}
+
+func (r *ReconcileArgoCD) setManagedNamespaces(cr *argoproj.ArgoCD) error {
+	namespaces := &corev1.NamespaceList{}
+	listOption := client.MatchingLabels{
+		common.ArgoCDManagedByLabel: cr.Namespace,
+	}
+
+	// get the list of namespaces managed by the Argo CD instance
+	if err := r.Client.List(context.TODO(), namespaces, listOption); err != nil {
+		return err
+	}
+
+	namespaces.Items = append(namespaces.Items, corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: cr.Namespace}})
+	r.ManagedNamespaces = namespaces
+	return nil
+}
+
+func isProxyCluster() bool {
+	cfg, err := config.GetConfig()
+	if err != nil {
+		log.Error(err, "failed to get k8s config")
+	}
+
+	// Initialize config client.
+	configClient, err := configv1client.NewForConfig(cfg)
+	if err != nil {
+		log.Error(err, "failed to initialize openshift config client")
+		return false
+	}
+
+	proxy, err := configClient.Proxies().Get(context.TODO(), "cluster", metav1.GetOptions{})
+	if err != nil {
+		log.Error(err, "failed to get proxy configuration")
+		return false
+	}
+
+	if proxy.Spec.HTTPSProxy != "" {
+		log.Info("proxy configuration detected")
+		return true
+	}
+
+	return false
+}
+
+func getOpenShiftAPIURL() string {
+	k8s, err := initK8sClient()
+	if err != nil {
+		log.Error(err, "failed to initialize k8s client")
+	}
+
+	cm, err := k8s.CoreV1().ConfigMaps("openshift-console").Get(context.TODO(), "console-config", metav1.GetOptions{})
+	if err != nil {
+		log.Error(err, "")
+	}
+
+	var cf string
+	if v, ok := cm.Data["console-config.yaml"]; ok {
+		cf = v
+	}
+
+	data := make(map[string]interface{})
+	err = yaml.Unmarshal([]byte(cf), data)
+	if err != nil {
+		log.Error(err, "")
+	}
+
+	var apiURL interface{}
+	var out string
+	if c, ok := data["clusterInfo"]; ok {
+		ci, _ := c.(map[interface{}]interface{})
+
+		apiURL = ci["masterPublicURL"]
+		out = fmt.Sprintf("%v", apiURL)
+	}
+
+	return out
+}
+
+func AddSeccompProfileForOpenShift(client client.Client, podspec *corev1.PodSpec) {
+	if !IsVersionAPIAvailable() {
+		return
+	}
+	version, err := getClusterVersion(client)
+	if err != nil {
+		log.Error(err, "couldn't get OpenShift version")
+	}
+	if version == "" || semver.Compare(fmt.Sprintf("v%s", version), "v4.10.999") > 0 {
+		if podspec.SecurityContext == nil {
+			podspec.SecurityContext = &corev1.PodSecurityContext{}
+		}
+		if podspec.SecurityContext.SeccompProfile == nil {
+			podspec.SecurityContext.SeccompProfile = &corev1.SeccompProfile{}
+		}
+		if len(podspec.SecurityContext.SeccompProfile.Type) == 0 {
+			podspec.SecurityContext.SeccompProfile.Type = corev1.SeccompProfileTypeRuntimeDefault
+		}
+	}
+}
+
+// getClusterVersion returns the OpenShift Cluster version in which the operator is installed
+func getClusterVersion(client client.Client) (string, error) {
+	if !IsVersionAPIAvailable() {
+		return "", nil
+	}
+	clusterVersion := &configv1.ClusterVersion{}
+	err := client.Get(context.TODO(), types.NamespacedName{Name: "version"}, clusterVersion)
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return "", nil
+		}
+		return "", err
+	}
+	return clusterVersion.Status.Desired.Version, nil
+}
+
+// generateRandomBytes returns a securely generated random bytes.
+func generateRandomBytes(n int) []byte {
+	b := make([]byte, n)
+	_, err := rand.Read(b)
+	if err != nil {
+		log.Error(err, "")
+	}
+	return b
+}
+
+// generateRandomString returns a securely generated random string.
+func generateRandomString(s int) string {
+	b := generateRandomBytes(s)
+	return base64.URLEncoding.EncodeToString(b)
+}
+
+// contains returns true if a string is part of the given slice.
+func contains(s []string, g string) bool {
+	for _, a := range s {
+		if a == g {
+			return true
+		}
+	}
+	return false
 }

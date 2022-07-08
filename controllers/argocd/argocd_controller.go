@@ -20,11 +20,13 @@ import (
 	"context"
 	"fmt"
 
-	ctrl "sigs.k8s.io/controller-runtime"
-
 	argoproj "github.com/argoproj-labs/argocd-operator/api/v1alpha1"
+
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
+
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logr "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -37,7 +39,8 @@ var _ reconcile.Reconciler = &ReconcileArgoCD{}
 // TODO(upgrade): rename to ArgoCDRecoonciler
 type ReconcileArgoCD struct {
 	client.Client
-	Scheme *runtime.Scheme
+	Scheme            *runtime.Scheme
+	ManagedNamespaces *corev1.NamespaceList
 }
 
 var log = logr.Log.WithName("controller_argocd")
@@ -50,12 +53,15 @@ var log = logr.Log.WithName("controller_argocd")
 //+kubebuilder:rbac:groups=argoproj.io,resources=argocds;argocds/finalizers;argocds/status,verbs=*
 //+kubebuilder:rbac:groups=autoscaling,resources=horizontalpodautoscalers,verbs=*
 //+kubebuilder:rbac:groups=batch,resources=cronjobs;jobs,verbs=*
+//+kubebuilder:rbac:groups=config.openshift.io,resources=clusterversions,verbs=get;list;watch
 //+kubebuilder:rbac:groups=networking.k8s.io,resources=ingresses,verbs=*
 //+kubebuilder:rbac:groups=monitoring.coreos.com,resources=prometheuses;servicemonitors,verbs=*
 //+kubebuilder:rbac:groups=route.openshift.io,resources=routes;routes/custom-host,verbs=*
 //+kubebuilder:rbac:groups=argoproj.io,resources=applications;appprojects,verbs=*
 //+kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=*,verbs=*
 //+kubebuilder:rbac:groups="",resources=pods;pods/log,verbs=get
+//+kubebuilder:rbac:groups=template.openshift.io,resources=templates;templateinstances;templateconfigs,verbs=*
+//+kubebuilder:rbac:groups="oauth.openshift.io",resources=oauthclients,verbs=get;list;watch;create;delete;patch;update
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -88,8 +94,10 @@ func (r *ReconcileArgoCD) Reconcile(ctx context.Context, request ctrl.Request) (
 				return reconcile.Result{}, fmt.Errorf("failed to delete ClusterResources: %w", err)
 			}
 
-			if err := r.removeManagedByLabelFromNamespaces(argocd.Namespace); err != nil {
-				return reconcile.Result{}, fmt.Errorf("failed to remove label from namespace[%v], error: %w", argocd.Namespace, err)
+			if isRemoveManagedByLabelOnArgoCDDeletion() {
+				if err := r.removeManagedByLabelFromNamespaces(argocd.Namespace); err != nil {
+					return reconcile.Result{}, fmt.Errorf("failed to remove label from namespace[%v], error: %w", argocd.Namespace, err)
+				}
 			}
 
 			if err := r.removeDeletionFinalizer(argocd); err != nil {
@@ -110,6 +118,10 @@ func (r *ReconcileArgoCD) Reconcile(ctx context.Context, request ctrl.Request) (
 		return reconcile.Result{}, err
 	}
 
+	if err = r.setManagedNamespaces(argocd); err != nil {
+		return reconcile.Result{}, err
+	}
+
 	if err := r.reconcileResources(argocd); err != nil {
 		// Error reconciling ArgoCD sub-resources - requeue the request.
 		return reconcile.Result{}, err
@@ -122,6 +134,6 @@ func (r *ReconcileArgoCD) Reconcile(ctx context.Context, request ctrl.Request) (
 // SetupWithManager sets up the controller with the Manager.
 func (r *ReconcileArgoCD) SetupWithManager(mgr ctrl.Manager) error {
 	bldr := ctrl.NewControllerManagedBy(mgr)
-	setResourceWatches(bldr, r.clusterResourceMapper, r.tlsSecretMapper, r.namespaceResourceMapper)
+	r.setResourceWatches(bldr, r.clusterResourceMapper, r.tlsSecretMapper, r.namespaceResourceMapper)
 	return bldr.Complete(r)
 }

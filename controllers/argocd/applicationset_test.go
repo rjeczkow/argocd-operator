@@ -16,16 +16,14 @@ package argocd
 
 import (
 	"context"
-	"os"
 	"sort"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
-	"gotest.tools/assert"
+	"github.com/stretchr/testify/assert"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
-	resourcev1 "k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -36,6 +34,43 @@ import (
 	"github.com/argoproj-labs/argocd-operator/controllers/argoutil"
 )
 
+func applicationSetDefaultVolumeMounts() []corev1.VolumeMount {
+	repoMounts := repoServerDefaultVolumeMounts()
+	ignoredMounts := map[string]bool{
+		"plugins":                             true,
+		"argocd-repo-server-tls":              true,
+		common.ArgoCDRedisServerTLSSecretName: true,
+	}
+	mounts := make([]corev1.VolumeMount, len(repoMounts)-len(ignoredMounts), len(repoMounts)-len(ignoredMounts))
+	j := 0
+	for _, mount := range repoMounts {
+		if !ignoredMounts[mount.Name] {
+			mounts[j] = mount
+			j += 1
+		}
+	}
+	return mounts
+}
+
+func applicationSetDefaultVolumes() []corev1.Volume {
+	repoVolumes := repoServerDefaultVolumes()
+	ignoredVolumes := map[string]bool{
+		"var-files":                           true,
+		"plugins":                             true,
+		"argocd-repo-server-tls":              true,
+		common.ArgoCDRedisServerTLSSecretName: true,
+	}
+	volumes := make([]corev1.Volume, len(repoVolumes)-len(ignoredVolumes), len(repoVolumes)-len(ignoredVolumes))
+	j := 0
+	for _, volume := range repoVolumes {
+		if !ignoredVolumes[volume.Name] {
+			volumes[j] = volume
+			j += 1
+		}
+	}
+	return volumes
+}
+
 func TestReconcileApplicationSet_CreateDeployments(t *testing.T) {
 	logf.SetLogger(ZapLogger(true))
 	a := makeTestArgoCD()
@@ -45,10 +80,10 @@ func TestReconcileApplicationSet_CreateDeployments(t *testing.T) {
 
 	sa := corev1.ServiceAccount{}
 
-	assert.NilError(t, r.reconcileApplicationSetDeployment(a, &sa))
+	assert.NoError(t, r.reconcileApplicationSetDeployment(a, &sa))
 
 	deployment := &appsv1.Deployment{}
-	assert.NilError(t, r.Client.Get(
+	assert.NoError(t, r.Client.Get(
 		context.TODO(),
 		types.NamespacedName{
 			Name:      "argocd-applicationset-controller",
@@ -64,21 +99,7 @@ func checkExpectedDeploymentValues(t *testing.T, deployment *appsv1.Deployment, 
 	assert.Equal(t, deployment.Spec.Template.Spec.ServiceAccountName, sa.ObjectMeta.Name)
 	appsetAssertExpectedLabels(t, &deployment.ObjectMeta)
 
-	want := []corev1.Container{{
-		Command: []string{"applicationset-controller", "--argocd-repo-server", getRepoServerAddress(a), "--loglevel", "info"},
-		Env: []corev1.EnvVar{{
-			Name: "NAMESPACE",
-			ValueFrom: &corev1.EnvVarSource{
-				FieldRef: &corev1.ObjectFieldSelector{
-					FieldPath: "metadata.namespace",
-				},
-			},
-		}},
-		Image:           argoutil.CombineImageTag(common.ArgoCDDefaultApplicationSetImage, common.ArgoCDDefaultApplicationSetVersion),
-		ImagePullPolicy: corev1.PullAlways,
-		Name:            "argocd-applicationset-controller",
-		VolumeMounts:    repoServerDefaultVolumeMounts(),
-	}}
+	want := []corev1.Container{applicationSetContainer(a)}
 
 	if diff := cmp.Diff(want, deployment.Spec.Template.Spec.Containers); diff != "" {
 		t.Fatalf("failed to reconcile applicationset-controller deployment containers:\n%s", diff)
@@ -122,12 +143,9 @@ func checkExpectedDeploymentValues(t *testing.T, deployment *appsv1.Deployment, 
 			},
 		},
 		{
-			Name: "argocd-repo-server-tls",
+			Name: "tmp",
 			VolumeSource: corev1.VolumeSource{
-				Secret: &corev1.SecretVolumeSource{
-					SecretName: common.ArgoCDRepoServerTLSSecretName,
-					Optional:   boolPtr(true),
-				},
+				EmptyDir: &corev1.EmptyDirVolumeSource{},
 			},
 		},
 	}
@@ -145,6 +163,61 @@ func checkExpectedDeploymentValues(t *testing.T, deployment *appsv1.Deployment, 
 	if diff := cmp.Diff(expectedSelector, deployment.Spec.Selector); diff != "" {
 		t.Fatalf("failed to reconcile applicationset-controller label selector:\n%s", diff)
 	}
+}
+
+func TestReconcileApplicationSetProxyConfiguration(t *testing.T) {
+	logf.SetLogger(ZapLogger(true))
+
+	// Proxy Env vars
+	setProxyEnvVars(t)
+
+	a := makeTestArgoCD()
+	a.Spec.ApplicationSet = &v1alpha1.ArgoCDApplicationSet{}
+
+	r := makeTestReconciler(t, a)
+
+	sa := corev1.ServiceAccount{}
+
+	r.reconcileApplicationSetDeployment(a, &sa)
+
+	want := []corev1.EnvVar{
+		{
+			Name:  "HTTPS_PROXY",
+			Value: "https://example.com",
+		},
+		{
+			Name:  "HTTP_PROXY",
+			Value: "http://example.com",
+		},
+		{
+			Name: "NAMESPACE",
+			ValueFrom: &corev1.EnvVarSource{
+				FieldRef: &corev1.ObjectFieldSelector{
+					FieldPath: "metadata.namespace",
+				},
+			},
+		},
+		{
+			Name:  "NO_PROXY",
+			Value: ".cluster.local",
+		},
+	}
+
+	deployment := &appsv1.Deployment{}
+
+	// reconcile ApplicationSets
+	r.Client.Get(
+		context.TODO(),
+		types.NamespacedName{
+			Name:      "argocd-applicationset-controller",
+			Namespace: a.Namespace,
+		},
+		deployment)
+
+	if diff := cmp.Diff(want, deployment.Spec.Template.Spec.Containers[0].Env); diff != "" {
+		t.Fatalf("failed to reconcile applicationset-controller deployment containers:\n%s", diff)
+	}
+
 }
 
 func TestReconcileApplicationSet_UpdateExistingDeployments(t *testing.T) {
@@ -176,10 +249,10 @@ func TestReconcileApplicationSet_UpdateExistingDeployments(t *testing.T) {
 
 	sa := corev1.ServiceAccount{}
 
-	assert.NilError(t, r.reconcileApplicationSetDeployment(a, &sa))
+	assert.NoError(t, r.reconcileApplicationSetDeployment(a, &sa))
 
 	deployment := &appsv1.Deployment{}
-	assert.NilError(t, r.Client.Get(
+	assert.NoError(t, r.Client.Get(
 		context.TODO(),
 		types.NamespacedName{
 			Name:      "argocd-applicationset-controller",
@@ -200,10 +273,10 @@ func TestReconcileApplicationSet_Deployments_resourceRequirements(t *testing.T) 
 
 	sa := corev1.ServiceAccount{}
 
-	assert.NilError(t, r.reconcileApplicationSetDeployment(a, &sa))
+	assert.NoError(t, r.reconcileApplicationSetDeployment(a, &sa))
 
 	deployment := &appsv1.Deployment{}
-	assert.NilError(t, r.Client.Get(
+	assert.NoError(t, r.Client.Get(
 		context.TODO(),
 		types.NamespacedName{
 			Name:      "argocd-applicationset-controller",
@@ -214,37 +287,13 @@ func TestReconcileApplicationSet_Deployments_resourceRequirements(t *testing.T) 
 	assert.Equal(t, deployment.Spec.Template.Spec.ServiceAccountName, sa.ObjectMeta.Name)
 	appsetAssertExpectedLabels(t, &deployment.ObjectMeta)
 
-	containerWant := []corev1.Container{{
-		Command: []string{"applicationset-controller", "--argocd-repo-server", getRepoServerAddress(a), "--loglevel", "info"},
-		Env: []corev1.EnvVar{{
-			Name: "NAMESPACE",
-			ValueFrom: &corev1.EnvVarSource{
-				FieldRef: &corev1.ObjectFieldSelector{
-					FieldPath: "metadata.namespace",
-				},
-			},
-		}},
-		Image:           argoutil.CombineImageTag(common.ArgoCDDefaultApplicationSetImage, common.ArgoCDDefaultApplicationSetVersion),
-		ImagePullPolicy: corev1.PullAlways,
-		Name:            "argocd-applicationset-controller",
-		Resources: corev1.ResourceRequirements{
-			Requests: corev1.ResourceList{
-				corev1.ResourceMemory: resourcev1.MustParse("1024Mi"),
-				corev1.ResourceCPU:    resourcev1.MustParse("1000m"),
-			},
-			Limits: corev1.ResourceList{
-				corev1.ResourceMemory: resourcev1.MustParse("2048Mi"),
-				corev1.ResourceCPU:    resourcev1.MustParse("2000m"),
-			},
-		},
-		VolumeMounts: repoServerDefaultVolumeMounts(),
-	}}
+	containerWant := []corev1.Container{applicationSetContainer(a)}
 
 	if diff := cmp.Diff(containerWant, deployment.Spec.Template.Spec.Containers); diff != "" {
 		t.Fatalf("failed to reconcile argocd-server deployment:\n%s", diff)
 	}
 
-	volumesWant := repoServerDefaultVolumes()
+	volumesWant := applicationSetDefaultVolumes()
 
 	if diff := cmp.Diff(volumesWant, deployment.Spec.Template.Spec.Volumes); diff != "" {
 		t.Fatalf("failed to reconcile argocd-server deployment:\n%s", diff)
@@ -263,7 +312,7 @@ func TestReconcileApplicationSet_Deployments_SpecOverride(t *testing.T) {
 		{
 			name:                   "unspecified fields should use default",
 			appSetField:            &v1alpha1.ArgoCDApplicationSet{},
-			expectedContainerImage: argoutil.CombineImageTag(common.ArgoCDDefaultApplicationSetImage, common.ArgoCDDefaultApplicationSetVersion),
+			expectedContainerImage: argoutil.CombineImageTag(common.ArgoCDDefaultArgoImage, common.ArgoCDDefaultArgoVersion),
 		},
 		{
 			name: "ensure that sha hashes are formatted correctly",
@@ -284,7 +333,7 @@ func TestReconcileApplicationSet_Deployments_SpecOverride(t *testing.T) {
 		{
 			name:                   "verify env var substitution overrides default",
 			appSetField:            &v1alpha1.ArgoCDApplicationSet{},
-			envVars:                map[string]string{common.ArgoCDApplicationSetEnvName: "custom-env-image"},
+			envVars:                map[string]string{common.ArgoCDImageEnvName: "custom-env-image"},
 			expectedContainerImage: "custom-env-image",
 		},
 
@@ -294,7 +343,7 @@ func TestReconcileApplicationSet_Deployments_SpecOverride(t *testing.T) {
 				Image:   "custom-image",
 				Version: "custom-version",
 			},
-			envVars:                map[string]string{common.ArgoCDApplicationSetEnvName: "custom-env-image"},
+			envVars:                map[string]string{common.ArgoCDImageEnvName: "custom-env-image"},
 			expectedContainerImage: "custom-image:custom-version",
 		},
 	}
@@ -303,7 +352,7 @@ func TestReconcileApplicationSet_Deployments_SpecOverride(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 
 			for testEnvName, testEnvValue := range test.envVars {
-				os.Setenv(testEnvName, testEnvValue)
+				t.Setenv(testEnvName, testEnvValue)
 			}
 
 			a := makeTestArgoCD()
@@ -312,10 +361,10 @@ func TestReconcileApplicationSet_Deployments_SpecOverride(t *testing.T) {
 			a.Spec.ApplicationSet = test.appSetField
 
 			sa := corev1.ServiceAccount{}
-			assert.NilError(t, r.reconcileApplicationSetDeployment(a, &sa))
+			assert.NoError(t, r.reconcileApplicationSetDeployment(a, &sa))
 
 			deployment := &appsv1.Deployment{}
-			assert.NilError(t, r.Client.Get(
+			assert.NoError(t, r.Client.Get(
 				context.TODO(),
 				types.NamespacedName{
 					Name:      "argocd-applicationset-controller",
@@ -324,7 +373,7 @@ func TestReconcileApplicationSet_Deployments_SpecOverride(t *testing.T) {
 				deployment))
 
 			specImage := deployment.Spec.Template.Spec.Containers[0].Image
-			assert.Equal(t, specImage, test.expectedContainerImage)
+			assert.Equal(t, test.expectedContainerImage, specImage)
 
 		})
 	}
@@ -337,10 +386,10 @@ func TestReconcileApplicationSet_ServiceAccount(t *testing.T) {
 	r := makeTestReconciler(t, a)
 
 	retSa, err := r.reconcileApplicationSetServiceAccount(a)
-	assert.NilError(t, err)
+	assert.NoError(t, err)
 
 	sa := &corev1.ServiceAccount{}
-	assert.NilError(t, r.Client.Get(
+	assert.NoError(t, r.Client.Get(
 		context.TODO(),
 		types.NamespacedName{
 			Name:      "argocd-applicationset-controller",
@@ -359,10 +408,10 @@ func TestReconcileApplicationSet_Role(t *testing.T) {
 	r := makeTestReconciler(t, a)
 
 	roleRet, err := r.reconcileApplicationSetRole(a)
-	assert.NilError(t, err)
+	assert.NoError(t, err)
 
 	role := &rbacv1.Role{}
-	assert.NilError(t, r.Client.Get(
+	assert.NoError(t, r.Client.Get(
 		context.TODO(),
 		types.NamespacedName{
 			Name:      "argocd-applicationset-controller",
@@ -396,7 +445,7 @@ func TestReconcileApplicationSet_Role(t *testing.T) {
 	sort.Strings(expectedResources)
 	sort.Strings(foundResources)
 
-	assert.DeepEqual(t, expectedResources, foundResources)
+	assert.Equal(t, expectedResources, foundResources)
 }
 
 func TestReconcileApplicationSet_RoleBinding(t *testing.T) {
@@ -408,10 +457,10 @@ func TestReconcileApplicationSet_RoleBinding(t *testing.T) {
 	sa := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "sa-name"}}
 
 	err := r.reconcileApplicationSetRoleBinding(a, role, sa)
-	assert.NilError(t, err)
+	assert.NoError(t, err)
 
 	roleBinding := &rbacv1.RoleBinding{}
-	assert.NilError(t, r.Client.Get(
+	assert.NoError(t, r.Client.Get(
 		context.TODO(),
 		types.NamespacedName{
 			Name:      "argocd-applicationset-controller",
@@ -430,4 +479,10 @@ func appsetAssertExpectedLabels(t *testing.T, meta *metav1.ObjectMeta) {
 	assert.Equal(t, meta.Labels["app.kubernetes.io/name"], "argocd-applicationset-controller")
 	assert.Equal(t, meta.Labels["app.kubernetes.io/part-of"], "argocd-applicationset")
 	assert.Equal(t, meta.Labels["app.kubernetes.io/component"], "controller")
+}
+
+func setProxyEnvVars(t *testing.T) {
+	t.Setenv("HTTPS_PROXY", "https://example.com")
+	t.Setenv("HTTP_PROXY", "http://example.com")
+	t.Setenv("NO_PROXY", ".cluster.local")
 }

@@ -23,7 +23,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"gotest.tools/assert"
+	"github.com/stretchr/testify/assert"
 	appsv1 "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -50,7 +50,7 @@ func TestReconcileArgoCD_Reconcile_with_deleted(t *testing.T) {
 	a := makeTestArgoCD(deletedAt(time.Now()))
 
 	r := makeTestReconciler(t, a)
-	assert.NilError(t, createNamespace(r, a.Namespace, ""))
+	assert.NoError(t, createNamespace(r, a.Namespace, ""))
 
 	req := reconcile.Request{
 		NamespacedName: types.NamespacedName{
@@ -59,7 +59,7 @@ func TestReconcileArgoCD_Reconcile_with_deleted(t *testing.T) {
 		},
 	}
 	res, err := r.Reconcile(context.TODO(), req)
-	assert.NilError(t, err)
+	assert.NoError(t, err)
 	if res.Requeue {
 		t.Fatal("reconcile requeued request")
 	}
@@ -78,7 +78,7 @@ func TestReconcileArgoCD_Reconcile(t *testing.T) {
 	a := makeTestArgoCD()
 
 	r := makeTestReconciler(t, a)
-	assert.NilError(t, createNamespace(r, a.Namespace, ""))
+	assert.NoError(t, createNamespace(r, a.Namespace, ""))
 
 	req := reconcile.Request{
 		NamespacedName: types.NamespacedName{
@@ -88,7 +88,7 @@ func TestReconcileArgoCD_Reconcile(t *testing.T) {
 	}
 
 	res, err := r.Reconcile(context.TODO(), req)
-	assert.NilError(t, err)
+	assert.NoError(t, err)
 	if res.Requeue {
 		t.Fatal("reconcile requeued request")
 	}
@@ -99,6 +99,74 @@ func TestReconcileArgoCD_Reconcile(t *testing.T) {
 		Namespace: testNamespace,
 	}, deployment); err != nil {
 		t.Fatalf("failed to find the redis deployment: %#v\n", err)
+	}
+}
+
+func TestReconcileArgoCD_Reconcile_RemoveManagedByLabelOnArgocdDeletion(t *testing.T) {
+	logf.SetLogger(ZapLogger(true))
+
+	tests := []struct {
+		testName                                  string
+		nsName                                    string
+		isRemoveManagedByLabelOnArgoCDDeletionSet bool
+	}{
+		{
+			testName: "Without REMOVE_MANAGED_BY_LABEL_ON_ARGOCD_DELETION set",
+			nsName:   "newNamespaceTest1",
+			isRemoveManagedByLabelOnArgoCDDeletionSet: false,
+		},
+		{
+			testName: "With REMOVE_MANAGED_BY_LABEL_ON_ARGOCD_DELETION set",
+			nsName:   "newNamespaceTest2",
+			isRemoveManagedByLabelOnArgoCDDeletionSet: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.testName, func(t *testing.T) {
+			a := makeTestArgoCD(deletedAt(time.Now()), addFinalizer(common.ArgoCDDeletionFinalizer))
+			r := makeTestReconciler(t, a)
+
+			nsArgocd := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{
+				Name: a.Namespace,
+			}}
+			err := r.Client.Create(context.TODO(), nsArgocd)
+			assert.NoError(t, err)
+
+			if test.isRemoveManagedByLabelOnArgoCDDeletionSet {
+				t.Setenv("REMOVE_MANAGED_BY_LABEL_ON_ARGOCD_DELETION", "true")
+			}
+
+			ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{
+				Name: test.nsName,
+				Labels: map[string]string{
+					common.ArgoCDManagedByLabel: a.Namespace,
+				}},
+			}
+			err = r.Client.Create(context.TODO(), ns)
+			assert.NoError(t, err)
+
+			req := reconcile.Request{
+				NamespacedName: types.NamespacedName{
+					Name:      a.Name,
+					Namespace: a.Namespace,
+				},
+			}
+
+			_, err = r.Reconcile(context.TODO(), req)
+			assert.NoError(t, err)
+
+			assert.NoError(t, r.Client.Get(context.TODO(), types.NamespacedName{Name: ns.Name}, ns))
+			if test.isRemoveManagedByLabelOnArgoCDDeletionSet {
+				// Check if the managed-by label gets removed from the new namespace
+				if _, ok := ns.Labels[common.ArgoCDManagedByLabel]; ok {
+					t.Errorf("Expected the label[%v] to be removed from the namespace[%v]", common.ArgoCDManagedByLabel, ns.Name)
+				}
+			} else {
+				// Check if the managed-by label still exists in the new namespace
+				assert.Equal(t, ns.Labels[common.ArgoCDManagedByLabel], a.Namespace)
+			}
+		})
 	}
 }
 
@@ -116,7 +184,7 @@ func TestReconcileArgoCD_CleanUp(t *testing.T) {
 	resources := []runtime.Object{a}
 	resources = append(resources, clusterResources(a)...)
 	r := makeTestReconciler(t, resources...)
-	assert.NilError(t, createNamespace(r, a.Namespace, ""))
+	assert.NoError(t, createNamespace(r, a.Namespace, ""))
 
 	req := reconcile.Request{
 		NamespacedName: types.NamespacedName{
@@ -125,7 +193,7 @@ func TestReconcileArgoCD_CleanUp(t *testing.T) {
 		},
 	}
 	res, err := r.Reconcile(context.TODO(), req)
-	assert.NilError(t, err)
+	assert.NoError(t, err)
 	if res.Requeue {
 		t.Fatal("reconcile requeued request")
 	}
@@ -145,11 +213,11 @@ func TestReconcileArgoCD_CleanUp(t *testing.T) {
 		},
 		{
 			fmt.Sprintf("ClusterRoleBinding %s", common.ArgoCDApplicationControllerComponent),
-			newClusterRoleBinding(common.ArgoCDApplicationControllerComponent, a),
+			newClusterRoleBinding(a),
 		},
 		{
 			fmt.Sprintf("ClusterRoleBinding %s", common.ArgoCDServerComponent),
-			newClusterRoleBinding(common.ArgoCDServerComponent, a),
+			newClusterRoleBinding(a),
 		},
 	}
 
@@ -163,7 +231,7 @@ func TestReconcileArgoCD_CleanUp(t *testing.T) {
 
 	// check if namespace label was removed
 	ns := &corev1.Namespace{}
-	assert.NilError(t, r.Client.Get(context.TODO(), types.NamespacedName{Name: a.Namespace}, ns))
+	assert.NoError(t, r.Client.Get(context.TODO(), types.NamespacedName{Name: a.Namespace}, ns))
 	if _, ok := ns.Labels[common.ArgoCDManagedByLabel]; ok {
 		t.Errorf("Expected the label[%v] to be removed from the namespace[%v]", common.ArgoCDManagedByLabel, a.Namespace)
 	}

@@ -18,22 +18,31 @@ markdown_extensions:
     permalink: true
 nav:
   - Overview: index.md
+  - Release Process: release-process.md
+  - Security: SECURITY.md
+  - E2E Testing: e2e-test-guide.md
   - Install:
     - Getting Started: install/start.md
     - OpenShift: install/openshift.md
     - Operator Lifecycle Manager: install/olm.md
     - Manual Installation: install/manual.md
-    - Kustomize Installation: install/kustomize.md
   - Usage: 
     - Basics: usage/basics.md
+    - Config Management: usage/config_management_2.0.md
+    - Custom Tooling: usage/customization.md
     - Export: usage/export.md
+    - ExtraConfig: usage/extra-config.md
     - High Availability: usage/ha.md
     - Ingress: usage/ingress.md
     - Insights: usage/insights.md
     - Dex: usage/dex.md
-    - Keycloak: usage/keycloak.md
+    - Keycloak: 
+      - Kubernetes: usage/keycloak/kubernetes.md
+      - OpenShift: usage/keycloak/openshift.md
+    - Notifications: usage/notifications.md
     - Resource Management: usage/resource_management.md
     - Routes: usage/routes.md
+    - Custom Roles: usage/custom_roles.md
   - Reference:
     - ArgoCD: reference/argocd.md
     - ArgoCDExport: reference/argocdexport.md
@@ -42,5 +51,6 @@ nav:
       - Development: 
           - Setup: contribute/development.md
           - OLM Environment: contribute/olm-env.md
+          - OpenAPI: contribute/openapi.md
   - Releases ⧉: https://github.com/argoproj-labs/argocd-operator/releases
   - Roadmap ⧉: https://github.com/argoproj-labs/argocd-operator/milestones

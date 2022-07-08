@@ -7,6 +7,7 @@ import (
 
 	resourcev1 "k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 
 	argoprojv1alpha1 "github.com/argoproj-labs/argocd-operator/api/v1alpha1"
 
@@ -38,6 +39,15 @@ func controllerDefaultVolumes() []corev1.Volume {
 				},
 			},
 		},
+		{
+			Name: common.ArgoCDRedisServerTLSSecretName,
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName: common.ArgoCDRedisServerTLSSecretName,
+					Optional:   boolPtr(true),
+				},
+			},
+		},
 	}
 	return volumes
 }
@@ -47,6 +57,10 @@ func controllerDefaultVolumeMounts() []corev1.VolumeMount {
 		{
 			Name:      "argocd-repo-server-tls",
 			MountPath: "/app/config/controller/tls",
+		},
+		{
+			Name:      common.ArgoCDRedisServerTLSSecretName,
+			MountPath: "/app/config/controller/tls/redis",
 		},
 	}
 	return mounts
@@ -94,7 +108,7 @@ func TestReconcileArgoCD_reconcileApplicationController(t *testing.T) {
 	a := makeTestArgoCD()
 	r := makeTestReconciler(t, a)
 
-	assert.NoError(t, r.reconcileApplicationControllerStatefulSet(a))
+	assert.NoError(t, r.reconcileApplicationControllerStatefulSet(a, false))
 
 	ss := &appsv1.StatefulSet{}
 	assert.NoError(t, r.Client.Get(
@@ -127,15 +141,47 @@ func TestReconcileArgoCD_reconcileApplicationController(t *testing.T) {
 	}
 }
 
+func TestReconcileArgoCD_reconcileApplicationController_withRedisTLS(t *testing.T) {
+	logf.SetLogger(ZapLogger(true))
+	a := makeTestArgoCD()
+	r := makeTestReconciler(t, a)
+
+	assert.NoError(t, r.reconcileApplicationControllerStatefulSet(a, true))
+
+	ss := &appsv1.StatefulSet{}
+	assert.NoError(t, r.Client.Get(
+		context.TODO(),
+		types.NamespacedName{
+			Name:      "argocd-application-controller",
+			Namespace: a.Namespace,
+		},
+		ss))
+	command := ss.Spec.Template.Spec.Containers[0].Command
+	want := []string{
+		"argocd-application-controller",
+		"--operation-processors", "10",
+		"--redis", "argocd-redis.argocd.svc.cluster.local:6379",
+		"--redis-use-tls",
+		"--redis-ca-certificate", "/app/config/controller/tls/redis/tls.crt",
+		"--repo-server", "argocd-repo-server.argocd.svc.cluster.local:8081",
+		"--status-processors", "20",
+		"--kubectl-parallelism-limit", "10",
+		"--loglevel", "info",
+		"--logformat", "text"}
+	if diff := cmp.Diff(want, command); diff != "" {
+		t.Fatalf("reconciliation failed:\n%s", diff)
+	}
+}
+
 func TestReconcileArgoCD_reconcileApplicationController_withUpdate(t *testing.T) {
 	logf.SetLogger(ZapLogger(true))
 	a := makeTestArgoCD()
 	r := makeTestReconciler(t, a)
 
-	assert.NoError(t, r.reconcileApplicationControllerStatefulSet(a))
+	assert.NoError(t, r.reconcileApplicationControllerStatefulSet(a, false))
 
 	a = makeTestArgoCD(controllerProcessors(30))
-	assert.NoError(t, r.reconcileApplicationControllerStatefulSet(a))
+	assert.NoError(t, r.reconcileApplicationControllerStatefulSet(a, false))
 
 	ss := &appsv1.StatefulSet{}
 	assert.NoError(t, r.Client.Get(
@@ -168,7 +214,7 @@ func TestReconcileArgoCD_reconcileApplicationController_withUpgrade(t *testing.T
 	deploy := newDeploymentWithSuffix("application-controller", "application-controller", a)
 	assert.NoError(t, r.Client.Create(context.TODO(), deploy))
 
-	assert.NoError(t, r.reconcileApplicationControllerStatefulSet(a))
+	assert.NoError(t, r.reconcileApplicationControllerStatefulSet(a, false))
 	err := r.Client.Get(context.TODO(), types.NamespacedName{Name: deploy.Name, Namespace: deploy.Namespace}, deploy)
 	assert.Errorf(t, err, "not found")
 }
@@ -191,7 +237,7 @@ func TestReconcileArgoCD_reconcileApplicationController_withResources(t *testing
 	}
 	r := makeTestReconciler(t, a, &ex)
 
-	assert.NoError(t, r.reconcileApplicationControllerStatefulSet(a))
+	assert.NoError(t, r.reconcileApplicationControllerStatefulSet(a, false))
 
 	ss := &appsv1.StatefulSet{}
 	assert.NoError(t, r.Client.Get(
@@ -279,7 +325,7 @@ func TestReconcileArgoCD_reconcileApplicationController_withSharding(t *testing.
 		})
 		r := makeTestReconciler(t, a)
 
-		assert.NoError(t, r.reconcileApplicationControllerStatefulSet(a))
+		assert.NoError(t, r.reconcileApplicationControllerStatefulSet(a, false))
 
 		ss := &appsv1.StatefulSet{}
 		assert.NoError(t, r.Client.Get(
@@ -363,4 +409,25 @@ func Test_UpdateNodePlacementStateful(t *testing.T) {
 	if actualChange == expectedChange {
 		t.Fatalf("updateNodePlacement failed, value of changed: %t", actualChange)
 	}
+}
+
+func Test_ContainsValidImage(t *testing.T) {
+
+	a := makeTestArgoCD()
+	po := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Labels: map[string]string{
+				common.ArgoCDKeyName: fmt.Sprintf("%s-%s", a.Name, "application-controller"),
+			},
+		},
+	}
+	objs := []runtime.Object{
+		po,
+		a,
+	}
+	r := makeTestReconciler(t, objs...)
+	if containsInvalidImage(a, r) {
+		t.Fatalf("containsInvalidImage failed, got true, expected false")
+	}
+
 }

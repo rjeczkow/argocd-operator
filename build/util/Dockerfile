@@ -1,11 +1,11 @@
-# Argo CD v2.0.0
-FROM argoproj/argocd@sha256:8d1d58ef963f615da97e0b2c54dbe243801d5e7198b98393ab36b7a5768f72a4
+# Argo CD v2.4.3
+FROM quay.io/argoproj/argocd@sha256:f40b85b224d52fd897e12a4f48d9bd9ba28e02f311a4a59af58a4a653e003b6f
 
 USER root
 
 # Ensure system dependencies are installed
 RUN apt-get update && \
-    apt-get install -y curl && \
+    apt-get install -y curl python3-pip && \
     rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
 # Install the Google Cloud SDK (CLI)
