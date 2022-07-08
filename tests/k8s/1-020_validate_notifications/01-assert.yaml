@@ -1,0 +1,8 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: smtp4dev
+  labels:
+    app: smtp4dev
+status:
+  phase: Running
