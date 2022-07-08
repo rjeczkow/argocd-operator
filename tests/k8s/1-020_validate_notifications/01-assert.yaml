@@ -1,7 +1,6 @@
 apiVersion: apps/v1
-kind: Deployment
+kind: Pod
 metadata:
-  name: smtp4dev
   labels:
     app: smtp4dev
 status:
