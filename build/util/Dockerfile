@@ -1,5 +1,5 @@
-# Argo CD v2.4.3
-FROM quay.io/argoproj/argocd@sha256:f40b85b224d52fd897e12a4f48d9bd9ba28e02f311a4a59af58a4a653e003b6f
+# Argo CD v2.4.7
+FROM quay.io/argoproj/argocd@sha256:f887f854ab22f7f29f915aae2b765f2948d1555d61e9ce3ca9e659f8df22ab2b
 
 USER root
 
@@ -7,6 +7,9 @@ USER root
 RUN apt-get update && \
     apt-get install -y curl python3-pip && \
     rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+
+# Install the AWS CLI
+RUN pip3 install awscli
 
 # Install the Google Cloud SDK (CLI)
 RUN curl -sL https://sdk.cloud.google.com > /tmp/install.sh && \

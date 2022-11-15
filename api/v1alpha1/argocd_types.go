@@ -131,6 +131,8 @@ type ArgoCDApplicationSet struct {
 
 	// LogLevel describes the log level that should be used by the ApplicationSet controller. Defaults to ArgoCDDefaultLogLevel if not set.  Valid options are debug,info, error, and warn.
 	LogLevel string `json:"logLevel,omitempty"`
+
+	WebhookServer WebhookServerSpec `json:"webhookServer,omitempty"`
 }
 
 // ArgoCDCASpec defines the CA options for ArgCD.
@@ -249,6 +251,9 @@ type ArgoCDIngressSpec struct {
 	//+operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Ingress Enabled'",xDescriptors={"urn:alm:descriptor:com.tectonic.ui:fieldGroup:Grafana","urn:alm:descriptor:com.tectonic.ui:fieldGroup:Prometheus","urn:alm:descriptor:com.tectonic.ui:fieldGroup:Server","urn:alm:descriptor:com.tectonic.ui:booleanSwitch"}
 	Enabled bool `json:"enabled"`
 
+	// IngressClassName for the Ingress resource.
+	IngressClassName *string `json:"ingressClassName,omitempty"`
+
 	// Path used for the Ingress resource.
 	Path string `json:"path,omitempty"`
 
@@ -268,6 +273,9 @@ type ArgoCDKeycloakSpec struct {
 
 	// Resources defines the Compute Resources required by the container for Keycloak.
 	Resources *corev1.ResourceRequirements `json:"resources,omitempty"`
+
+	// Custom root CA certificate for communicating with the Keycloak OIDC provider
+	RootCA string `json:"rootCA,omitempty"`
 
 	// Version is the Keycloak container image tag.
 	Version string `json:"version,omitempty"`
@@ -293,6 +301,9 @@ type ArgoCDNotifications struct {
 
 	// Enabled defines whether argocd-notifications controller should be deployed or not
 	Enabled bool `json:"enabled"`
+
+	// Env let you specify environment variables for Notifications pods
+	Env []corev1.EnvVar `json:"env,omitempty"`
 
 	// Image is the Argo CD Notifications image (optional)
 	Image string `json:"image,omitempty"`
@@ -349,6 +360,10 @@ type ArgoCDRBACSpec struct {
 	// If omitted, defaults to: '[groups]'.
 	//+operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Scopes",xDescriptors={"urn:alm:descriptor:com.tectonic.ui:fieldGroup:RBAC","urn:alm:descriptor:com.tectonic.ui:text"}
 	Scopes *string `json:"scopes,omitempty"`
+
+	// PolicyMatcherMode configures the matchers function mode for casbin.
+	// There are two options for this, 'glob' for glob matcher or 'regex' for regex matcher.
+	PolicyMatcherMode *string `json:"policyMatcherMode,omitempty"`
 }
 
 // ArgoCDRedisSpec defines the desired state for the Redis server component.
@@ -825,6 +840,20 @@ type SSHHostsSpec struct {
 	// Keys describes a custom set of SSH Known Hosts that you would like to
 	// have included in your ArgoCD server.
 	Keys string `json:"keys,omitempty"`
+}
+
+// WebhookServerSpec defines the options for the ApplicationSet Webhook Server component.
+type WebhookServerSpec struct {
+
+	// Host is the hostname to use for Ingress/Route resources.
+	//+operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Host",xDescriptors={"urn:alm:descriptor:com.tectonic.ui:fieldGroup:Server","urn:alm:descriptor:com.tectonic.ui:text"}
+	Host string `json:"host,omitempty"`
+
+	// Ingress defines the desired state for an Ingress for the Application set webhook component.
+	Ingress ArgoCDIngressSpec `json:"ingress,omitempty"`
+
+	// Route defines the desired state for an OpenShift Route for the Application set webhook component.
+	Route ArgoCDRouteSpec `json:"route,omitempty"`
 }
 
 // IsDeletionFinalizerPresent checks if the instance has deletion finalizer

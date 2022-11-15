@@ -267,6 +267,10 @@ func (r *ReconcileArgoCD) reconcileNotificationsDeployment(cr *argoprojv1a1.Argo
 		desiredDeployment.Spec.Replicas = replicas
 	}
 
+	notificationEnv := cr.Spec.Notifications.Env
+	// Let user specify their own environment first
+	notificationEnv = argoutil.EnvMerge(notificationEnv, proxyEnvVars(), false)
+
 	podSpec := &desiredDeployment.Spec.Template.Spec
 	podSpec.SecurityContext = &corev1.PodSecurityContext{
 		RunAsNonRoot: boolPtr(true),
@@ -296,10 +300,11 @@ func (r *ReconcileArgoCD) reconcileNotificationsDeployment(cr *argoprojv1a1.Argo
 	}
 
 	podSpec.Containers = []corev1.Container{{
-		Command:         getNotificationsCommand(),
+		Command:         getNotificationsCommand(cr),
 		Image:           getArgoContainerImage(cr),
 		ImagePullPolicy: corev1.PullAlways,
 		Name:            common.ArgoCDNotificationsControllerComponent,
+		Env:             notificationEnv,
 		Resources:       getNotificationsResources(cr),
 		LivenessProbe: &corev1.Probe{
 			ProbeHandler: corev1.ProbeHandler{
@@ -370,6 +375,12 @@ func (r *ReconcileArgoCD) reconcileNotificationsDeployment(cr *argoprojv1a1.Argo
 
 	if !reflect.DeepEqual(existingDeployment.Spec.Template.Spec.Containers[0].Command, desiredDeployment.Spec.Template.Spec.Containers[0].Command) {
 		existingDeployment.Spec.Template.Spec.Containers[0].Command = desiredDeployment.Spec.Template.Spec.Containers[0].Command
+		deploymentChanged = true
+	}
+
+	if !reflect.DeepEqual(existingDeployment.Spec.Template.Spec.Containers[0].Env,
+		desiredDeployment.Spec.Template.Spec.Containers[0].Env) {
+		existingDeployment.Spec.Template.Spec.Containers[0].Env = desiredDeployment.Spec.Template.Spec.Containers[0].Env
 		deploymentChanged = true
 	}
 
@@ -512,10 +523,13 @@ func (r *ReconcileArgoCD) reconcileNotificationsSecret(cr *argoprojv1a1.ArgoCD) 
 	return nil
 }
 
-func getNotificationsCommand() []string {
+func getNotificationsCommand(cr *argoprojv1a1.ArgoCD) []string {
 
 	cmd := make([]string, 0)
 	cmd = append(cmd, "argocd-notifications")
+
+	cmd = append(cmd, "--loglevel")
+	cmd = append(cmd, getLogLevel(cr.Spec.Notifications.LogLevel))
 
 	return cmd
 }

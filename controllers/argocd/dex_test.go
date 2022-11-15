@@ -421,10 +421,10 @@ func TestReconcileArgoCD_reconcileDexDeployment(t *testing.T) {
 				},
 				VolumeMounts: []corev1.VolumeMount{
 					{Name: "static-files", MountPath: "/shared"}},
-				ImagePullPolicy: corev1.PullAlways,
 			},
 		},
 		ServiceAccountName: "argocd-argocd-dex-server",
+		NodeSelector:       common.DefaultNodeSelector(),
 	}
 	assert.Equal(t, want, deployment.Spec.Template.Spec)
 }
@@ -512,10 +512,10 @@ func TestReconcileArgoCD_reconcileDexDeployment_withUpdate(t *testing.T) {
 				},
 				VolumeMounts: []corev1.VolumeMount{
 					{Name: "static-files", MountPath: "/shared"}},
-				ImagePullPolicy: corev1.PullAlways,
 			},
 		},
 		ServiceAccountName: "argocd-argocd-dex-server",
+		NodeSelector:       common.DefaultNodeSelector(),
 	}
 
 	tests := []struct {

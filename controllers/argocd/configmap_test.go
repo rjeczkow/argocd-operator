@@ -133,8 +133,8 @@ func TestReconcileArgoCD_reconcileArgoConfigMap(t *testing.T) {
 		"dex.config":                         "",
 		"ga.anonymizeusers":                  "false",
 		"ga.trackingid":                      "",
-		"help.chatText":                      "Chat now!",
-		"help.chatUrl":                       "https://mycorp.slack.com/argo-cd",
+		"help.chatText":                      "",
+		"help.chatUrl":                       "",
 		"kustomize.buildOptions":             "",
 		"oidc.config":                        "",
 		"repositories":                       "",
@@ -868,4 +868,28 @@ func TestReconcileArgoCD_reconcileArgoConfigMap_withExtraConfig(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, cm.Data["admin.enabled"], "false")
 
+}
+
+func Test_reconcileRBAC(t *testing.T) {
+	a := makeTestArgoCD()
+	r := makeTestReconciler(t, a)
+
+	err := r.reconcileRBAC(a)
+	assert.NoError(t, err)
+
+	// Verify ArgoCD CR can be used to configure the RBAC policy matcher mode.\
+	matcherMode := "regex"
+	a.Spec.RBAC.PolicyMatcherMode = &matcherMode
+
+	err = r.reconcileRBAC(a)
+	assert.NoError(t, err)
+
+	cm := &corev1.ConfigMap{}
+	err = r.Client.Get(context.TODO(), types.NamespacedName{
+		Name:      common.ArgoCDRBACConfigMapName,
+		Namespace: testNamespace,
+	}, cm)
+
+	assert.NoError(t, err)
+	assert.Equal(t, cm.Data["policy.matchMode"], matcherMode)
 }

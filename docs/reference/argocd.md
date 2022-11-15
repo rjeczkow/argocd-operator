@@ -75,7 +75,7 @@ The following properties are available for configuring the ApplicationSet contro
 
 Name | Default | Description
 --- | --- | ---
-Image | `quay.io/argocdapplicationset/argocd-applicationset` | The container image for the ApplicationSet controller. This overrides the `ARGOCD_APPLICATIONSET_IMAGE` environment variable.
+Image | `quay.io/argoproj/argocd-applicationset` | The container image for the ApplicationSet controller. This overrides the `ARGOCD_APPLICATIONSET_IMAGE` environment variable.
 Version | *(recent ApplicationSet version)* | The tag to use with the ApplicationSet container image.
 Resources | [Empty] | The container compute resources.
 LogLevel | info | The log level to be used by the ArgoCD Application Controller component. Valid options are debug, info, error, and warn.
@@ -154,6 +154,22 @@ spec:
       operation: 10
       status: 20
     resources: {}
+```
+
+The following example shows how to set command line parameters using the env variable 
+
+``` yaml
+apiVersion: argoproj.io/v1alpha1
+kind: ArgoCD
+metadata:
+  name: example-argocd
+  labels:
+    example: controller
+spec:
+  controller:
+    env:
+    - name: ARGOCD_APPLICATION_CONTROLLER_REPO_SERVER_TIMEOUT_SECONDS
+      value: '120'    
 ```
 
 ## Dex Options
@@ -333,6 +349,7 @@ Name | Default | Description
 --- | --- | ---
 Annotations | [Empty] | The map of annotations to use for the Ingress resource.
 Enabled | `false` | Toggle creation of an Ingress resource.
+IngressClassName | [Empty] | IngressClass to use for the Ingress resource.
 Path | `/` | Path to use for Ingress resources.
 TLS | [Empty] | TLS configuration for the Ingress.
 
@@ -557,7 +574,8 @@ The following properties are available for configuring the Notifications control
 
 Name | Default | Description
 --- | --- | ---
-Enabled | `false` | The toggle that determines whether notifications-controller should be started or not.  
+Enabled | `false` | The toggle that determines whether notifications-controller should be started or not.
+Env | [Empty] | Environment to set for the notifications workloads.
 Image | `argoproj/argocd` | The container image for all Argo CD components. This overrides the `ARGOCD_IMAGE` environment variable.
 Version | *(recent Argo CD version)* | The tag to use with the Notifications container image.
 Resources | [Empty] | The container compute resources.
@@ -643,6 +661,7 @@ Name | Default | Description
 --- | --- | ---
 Image | OpenShift - `registry.redhat.io/rh-sso-7/sso75-openshift-rhel8` <br/> Kuberentes - `quay.io/keycloak/keycloak` | The container image for keycloak. This overrides the `ARGOCD_KEYCLOAK_IMAGE` environment variable.
 Resources | `Requests`: CPU=500m, Mem=512Mi, `Limits`: CPU=1000m, Mem=1024Mi | The container compute resources.
+RootCA | "" | root CA certificate for communicating with the OIDC provider
 VerifyTLS | true | Whether to enforce strict TLS checking when communicating with Keycloak service.
 Version | OpenShift - `sha256:720a7e4c4926c41c1219a90daaea3b971a3d0da5a152a96fed4fb544d80f52e3` (7.5.1) <br/> Kubernetes - `sha256:64fb81886fde61dee55091e6033481fa5ccdac62ae30a4fd29b54eb5e97df6a9` (15.0.2) | The tag to use with the keycloak container image.
 
@@ -795,6 +814,7 @@ Name | Default | Description
 --- | --- | ---
 Annotations | [Empty] | The map of annotations to use for the Ingress resource.
 Enabled | `false` | Toggle creation of an Ingress resource.
+IngressClassName | [Empty] | IngressClass to use for the Ingress resource.
 Path | `/` | Path to use for Ingress resources.
 TLS | [Empty] | TLS configuration for the Ingress.
 
@@ -840,6 +860,7 @@ Name | Default | Description
 --- | --- | ---
 DefaultPolicy | `role:readonly` | The `policy.default` property in the `argocd-rbac-cm` ConfigMap. The name of the default role which Argo CD will falls back to, when authorizing API requests.
 Policy | [Empty] | The `policy.csv` property in the `argocd-rbac-cm` ConfigMap. CSV data containing user-defined RBAC policies and role definitions.
+PolicyMatcherMode | `glob` | The `policy.matchMode` property in the `argocd-rbac-cm` ConfigMap. There are two options for this, 'glob' for glob matcher and 'regex' for regex matcher.
 Scopes | `[groups]` | The `scopes` property in the `argocd-rbac-cm` ConfigMap.  Controls which OIDC scopes to examine during rbac enforcement (in addition to `sub` scope).
 
 ### RBAC Example
@@ -856,6 +877,7 @@ metadata:
 spec:
   rbac:
     defaultPolicy: 'role:readonly'
+    policyMatcherMode: 'glob'
     policy: |
       g, system:cluster-admins, role:admin
     scopes: '[groups]'
@@ -939,7 +961,7 @@ The configuration to customize resource behavior. This property maps directly to
 
 ### Resource Customizations Example
 
-The following example defines a custom PV health check in the `argocd-cm` ConfigMap using the `ResourceCustomizations` property on the `ArgoCD` resource.
+The following example defines a custom PVC health check in the `argocd-cm` ConfigMap using the `ResourceCustomizations` property on the `ArgoCD` resource.
 
 ``` yaml
 apiVersion: argoproj.io/v1alpha1
@@ -1156,6 +1178,7 @@ Name | Default | Description
 --- | --- | ---
 Annotations | [Empty] | The map of annotations to use for the Ingress resource.
 Enabled | `false` | Toggle creation of an Ingress resource.
+IngressClassName | [Empty] | IngressClass to use for the Ingress resource.
 Path | `/` | Path to use for Ingress resources.
 TLS | [Empty] | TLS configuration for the Ingress.
 
@@ -1167,6 +1190,7 @@ Name | Default | Description
 --- | --- | ---
 Annotations | [Empty] | The map of annotations to use for the Ingress resource.
 Enabled | `false` | Toggle creation of an Ingress resource.
+IngressClassName | [Empty] | IngressClass to use for the Ingress resource.
 Path | `/` | Path to use for Ingress resources.
 TLS | [Empty] | TLS configuration for the Ingress.
 
